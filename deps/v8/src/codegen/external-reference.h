@@ -24,7 +24,7 @@ class StatsCounter;
 
 #define EXTERNAL_REFERENCE_LIST_WITH_ISOLATE(V)                                \
   V(isolate_address, "isolate")                                                \
-  V(builtins_address, "builtins")                                              \
+  V(builtins_table, "builtins_table")                                          \
   V(handle_scope_implementer_address,                                          \
     "Isolate::handle_scope_implementer_address")                               \
   V(address_of_interpreter_entry_trampoline_instruction_start,                 \
@@ -77,16 +77,16 @@ class StatsCounter;
   V(address_of_static_offsets_vector, "OffsetsVector::static_offsets_vector")  \
   V(thread_in_wasm_flag_address_address,                                       \
     "Isolate::thread_in_wasm_flag_address_address")                            \
-  V(re_case_insensitive_compare_unicode,                                       \
-    "NativeRegExpMacroAssembler::CaseInsensitiveCompareUnicode()")             \
-  V(re_case_insensitive_compare_non_unicode,                                   \
-    "NativeRegExpMacroAssembler::CaseInsensitiveCompareNonUnicode()")          \
-  V(re_check_stack_guard_state,                                                \
-    "RegExpMacroAssembler*::CheckStackGuardState()")                           \
-  V(re_grow_stack, "NativeRegExpMacroAssembler::GrowStack()")                  \
-  V(re_word_character_map, "NativeRegExpMacroAssembler::word_character_map")   \
   V(javascript_execution_assert, "javascript_execution_assert")                \
+  EXTERNAL_REFERENCE_LIST_WITH_ISOLATE_EXTERNAL_CODE_SPACE(V)                  \
   EXTERNAL_REFERENCE_LIST_WITH_ISOLATE_HEAP_SANDBOX(V)
+
+#ifdef V8_EXTERNAL_CODE_SPACE
+#define EXTERNAL_REFERENCE_LIST_WITH_ISOLATE_EXTERNAL_CODE_SPACE(V) \
+  V(builtins_code_data_container_table, "builtins_code_data_container_table")
+#else
+#define EXTERNAL_REFERENCE_LIST_WITH_ISOLATE_EXTERNAL_CODE_SPACE(V)
+#endif  // V8_EXTERNAL_CODE_SPACE
 
 #ifdef V8_HEAP_SANDBOX
 #define EXTERNAL_REFERENCE_LIST_WITH_ISOLATE_HEAP_SANDBOX(V) \
@@ -292,18 +292,39 @@ class StatsCounter;
           "tsan_relaxed_load_function_64_bits")                                \
   V(js_finalization_registry_remove_cell_from_unregister_token_map,            \
     "JSFinalizationRegistry::RemoveCellFromUnregisterTokenMap")                \
+  V(re_case_insensitive_compare_unicode,                                       \
+    "RegExpMacroAssembler::CaseInsensitiveCompareUnicode()")                   \
+  V(re_case_insensitive_compare_non_unicode,                                   \
+    "RegExpMacroAssembler::CaseInsensitiveCompareNonUnicode()")                \
+  V(re_is_character_in_range_array,                                            \
+    "RegExpMacroAssembler::IsCharacterInRangeArray()")                         \
+  V(re_check_stack_guard_state,                                                \
+    "RegExpMacroAssembler*::CheckStackGuardState()")                           \
+  V(re_grow_stack, "NativeRegExpMacroAssembler::GrowStack()")                  \
+  V(re_word_character_map, "NativeRegExpMacroAssembler::word_character_map")   \
   V(re_match_for_call_from_js, "IrregexpInterpreter::MatchForCallFromJs")      \
   V(re_experimental_match_for_call_from_js,                                    \
     "ExperimentalRegExp::MatchForCallFromJs")                                  \
   EXTERNAL_REFERENCE_LIST_INTL(V)                                              \
+  EXTERNAL_REFERENCE_LIST_VIRTUAL_MEMORY_CAGE(V)                               \
   EXTERNAL_REFERENCE_LIST_HEAP_SANDBOX(V)
 #ifdef V8_INTL_SUPPORT
 #define EXTERNAL_REFERENCE_LIST_INTL(V)                               \
   V(intl_convert_one_byte_to_lower, "intl_convert_one_byte_to_lower") \
-  V(intl_to_latin1_lower_table, "intl_to_latin1_lower_table")
+  V(intl_to_latin1_lower_table, "intl_to_latin1_lower_table")         \
+  V(intl_ascii_collation_weights_l1, "Intl::AsciiCollationWeightsL1") \
+  V(intl_ascii_collation_weights_l3, "Intl::AsciiCollationWeightsL3")
 #else
 #define EXTERNAL_REFERENCE_LIST_INTL(V)
 #endif  // V8_INTL_SUPPORT
+
+#ifdef V8_VIRTUAL_MEMORY_CAGE
+#define EXTERNAL_REFERENCE_LIST_VIRTUAL_MEMORY_CAGE(V)               \
+  V(virtual_memory_cage_base_address, "V8VirtualMemoryCage::base()") \
+  V(virtual_memory_cage_end_address, "V8VirtualMemoryCage::end()")
+#else
+#define EXTERNAL_REFERENCE_LIST_VIRTUAL_MEMORY_CAGE(V)
+#endif  // V8_VIRTUAL_MEMORY_CAGE
 
 #ifdef V8_HEAP_SANDBOX
 #define EXTERNAL_REFERENCE_LIST_HEAP_SANDBOX(V) \

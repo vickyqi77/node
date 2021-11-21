@@ -116,11 +116,21 @@ class WasmGraphBuildingInterface {
         inlined_status_(inlined_status) {}
 
   void StartFunction(FullDecoder* decoder) {
-    // Get the branch hints map for this function (if available)
+    // Get the branch hints map and type feedback for this function (if
+    // available).
     if (decoder->module_) {
       auto branch_hints_it = decoder->module_->branch_hints.find(func_index_);
       if (branch_hints_it != decoder->module_->branch_hints.end()) {
         branch_hints_ = &branch_hints_it->second;
+      }
+      TypeFeedbackStorage& feedbacks = decoder->module_->type_feedback;
+      base::MutexGuard mutex_guard(&feedbacks.mutex);
+      auto feedback = feedbacks.feedback_for_function.find(func_index_);
+      if (feedback != feedbacks.feedback_for_function.end()) {
+        type_feedback_ = feedback->second.feedback_vector;
+        // We need to keep the feedback in the module to inline later. However,
+        // this means we are stuck with it forever.
+        // TODO(jkummerow): Reconsider our options here.
       }
     }
     // The first '+ 1' is needed by TF Start node, the second '+ 1' is for the
@@ -657,7 +667,16 @@ class WasmGraphBuildingInterface {
   void CallRef(FullDecoder* decoder, const Value& func_ref,
                const FunctionSig* sig, uint32_t sig_index, const Value args[],
                Value returns[]) {
-    if (!FLAG_wasm_inlining) {
+    int maybe_feedback = -1;
+    // TODO(jkummerow): The way we currently prepare type feedback means that
+    // we won't have any for inlined functions. Figure out how to change that.
+    if (FLAG_wasm_speculative_inlining && type_feedback_.size() > 0) {
+      DCHECK_LT(feedback_instruction_index_, type_feedback_.size());
+      maybe_feedback =
+          type_feedback_[feedback_instruction_index_].function_index;
+      feedback_instruction_index_++;
+    }
+    if (maybe_feedback == -1) {
       DoCall(decoder, CallInfo::CallRef(func_ref, NullCheckFor(func_ref.type)),
              sig, args, returns);
       return;
@@ -665,9 +684,14 @@ class WasmGraphBuildingInterface {
 
     // Check for equality against a function at a specific index, and if
     // successful, just emit a direct call.
-    // TODO(12166): For now, we check against function 0. Decide the index based
-    // on liftoff feedback.
-    const uint32_t expected_function_index = 0;
+    DCHECK_GE(maybe_feedback, 0);
+    const uint32_t expected_function_index = maybe_feedback;
+
+    if (FLAG_trace_wasm_speculative_inlining) {
+      PrintF("[Function #%d call #%d: graph support for inlining target #%d]\n",
+             func_index_, feedback_instruction_index_ - 1,
+             expected_function_index);
+    }
 
     TFNode* success_control;
     TFNode* failure_control;
@@ -715,7 +739,14 @@ class WasmGraphBuildingInterface {
   void ReturnCallRef(FullDecoder* decoder, const Value& func_ref,
                      const FunctionSig* sig, uint32_t sig_index,
                      const Value args[]) {
-    if (!FLAG_wasm_inlining) {
+    int maybe_feedback = -1;
+    if (FLAG_wasm_speculative_inlining && type_feedback_.size() > 0) {
+      DCHECK_LT(feedback_instruction_index_, type_feedback_.size());
+      maybe_feedback =
+          type_feedback_[feedback_instruction_index_].function_index;
+      feedback_instruction_index_++;
+    }
+    if (maybe_feedback == -1) {
       DoReturnCall(decoder,
                    CallInfo::CallRef(func_ref, NullCheckFor(func_ref.type)),
                    sig, args);
@@ -724,9 +755,14 @@ class WasmGraphBuildingInterface {
 
     // Check for equality against a function at a specific index, and if
     // successful, just emit a direct call.
-    // TODO(12166): For now, we check against function 0. Decide the index based
-    // on liftoff feedback.
-    const uint32_t expected_function_index = 0;
+    DCHECK_GE(maybe_feedback, 0);
+    const uint32_t expected_function_index = maybe_feedback;
+
+    if (FLAG_trace_wasm_speculative_inlining) {
+      PrintF("[Function #%d call #%d: graph support for inlining target #%d]\n",
+             func_index_, feedback_instruction_index_ - 1,
+             expected_function_index);
+    }
 
     TFNode* success_control;
     TFNode* failure_control;
@@ -1251,6 +1287,10 @@ class WasmGraphBuildingInterface {
   // Tracks loop data for loop unrolling.
   std::vector<compiler::WasmLoopInfo> loop_infos_;
   InlinedStatus inlined_status_;
+  // The entries in {type_feedback_} are indexed by the position of feedback-
+  // consuming instructions (currently only call_ref).
+  int feedback_instruction_index_ = 0;
+  std::vector<CallSiteFeedback> type_feedback_;
 
   TFNode* effect() { return builder_->effect(); }
 
@@ -1594,6 +1634,18 @@ class WasmGraphBuildingInterface {
               const Value args[], Value returns[]) {
     size_t param_count = sig->parameter_count();
     size_t return_count = sig->return_count();
+
+    // Construct a function signature based on the real function parameters.
+    FunctionSig::Builder real_sig_builder(builder_->graph_zone(), return_count,
+                                          param_count);
+    for (size_t i = 0; i < param_count; i++) {
+      real_sig_builder.AddParam(args[i].type);
+    }
+    for (size_t i = 0; i < return_count; i++) {
+      real_sig_builder.AddReturn(sig->GetReturn(i));
+    }
+    FunctionSig* real_sig = real_sig_builder.Build();
+
     NodeVector arg_nodes(param_count + 1);
     base::SmallVector<TFNode*, 1> return_nodes(return_count);
     arg_nodes[0] = (call_info.call_mode() == CallInfo::kCallDirect)
@@ -1608,19 +1660,20 @@ class WasmGraphBuildingInterface {
         CheckForException(
             decoder, builder_->CallIndirect(
                          call_info.table_index(), call_info.sig_index(),
-                         base::VectorOf(arg_nodes),
+                         real_sig, base::VectorOf(arg_nodes),
                          base::VectorOf(return_nodes), decoder->position()));
         break;
       case CallInfo::kCallDirect:
         CheckForException(
-            decoder, builder_->CallDirect(
-                         call_info.callee_index(), base::VectorOf(arg_nodes),
-                         base::VectorOf(return_nodes), decoder->position()));
+            decoder, builder_->CallDirect(call_info.callee_index(), real_sig,
+                                          base::VectorOf(arg_nodes),
+                                          base::VectorOf(return_nodes),
+                                          decoder->position()));
         break;
       case CallInfo::kCallRef:
         CheckForException(
             decoder,
-            builder_->CallRef(sig, base::VectorOf(arg_nodes),
+            builder_->CallRef(real_sig, base::VectorOf(arg_nodes),
                               base::VectorOf(return_nodes),
                               call_info.null_check(), decoder->position()));
         break;
@@ -1636,6 +1689,17 @@ class WasmGraphBuildingInterface {
   void DoReturnCall(FullDecoder* decoder, CallInfo call_info,
                     const FunctionSig* sig, const Value args[]) {
     size_t arg_count = sig->parameter_count();
+
+    // Construct a function signature based on the real function parameters.
+    FunctionSig::Builder real_sig_builder(builder_->graph_zone(),
+                                          sig->return_count(), arg_count);
+    for (size_t i = 0; i < arg_count; i++) {
+      real_sig_builder.AddParam(args[i].type);
+    }
+    for (size_t i = 0; i < sig->return_count(); i++) {
+      real_sig_builder.AddReturn(sig->GetReturn(i));
+    }
+    FunctionSig* real_sig = real_sig_builder.Build();
 
     ValueVector arg_values(arg_count + 1);
     if (call_info.call_mode() == CallInfo::kCallDirect) {
@@ -1659,22 +1723,23 @@ class WasmGraphBuildingInterface {
 
     switch (call_info.call_mode()) {
       case CallInfo::kCallIndirect:
-        CheckForException(decoder,
-                          builder_->ReturnCallIndirect(
-                              call_info.table_index(), call_info.sig_index(),
-                              base::VectorOf(arg_nodes), decoder->position()));
+        CheckForException(
+            decoder,
+            builder_->ReturnCallIndirect(
+                call_info.table_index(), call_info.sig_index(), real_sig,
+                base::VectorOf(arg_nodes), decoder->position()));
         break;
       case CallInfo::kCallDirect:
-        CheckForException(decoder,
-                          builder_->ReturnCall(call_info.callee_index(),
-                                               base::VectorOf(arg_nodes),
-                                               decoder->position()));
+        CheckForException(
+            decoder, builder_->ReturnCall(call_info.callee_index(), real_sig,
+                                          base::VectorOf(arg_nodes),
+                                          decoder->position()));
         break;
       case CallInfo::kCallRef:
-        CheckForException(
-            decoder, builder_->ReturnCallRef(sig, base::VectorOf(arg_nodes),
-                                             call_info.null_check(),
-                                             decoder->position()));
+        CheckForException(decoder,
+                          builder_->ReturnCallRef(
+                              real_sig, base::VectorOf(arg_nodes),
+                              call_info.null_check(), decoder->position()));
         break;
     }
   }
@@ -1754,8 +1819,9 @@ class WasmGraphBuildingInterface {
 
   CheckForNull NullCheckFor(ValueType type) {
     DCHECK(type.is_object_reference());
-    return type.is_nullable() ? CheckForNull::kWithNullCheck
-                              : CheckForNull::kWithoutNullCheck;
+    return (!FLAG_experimental_wasm_skip_null_checks && type.is_nullable())
+               ? CheckForNull::kWithNullCheck
+               : CheckForNull::kWithoutNullCheck;
   }
 };
 

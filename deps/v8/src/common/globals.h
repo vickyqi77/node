@@ -33,6 +33,7 @@ namespace internal {
 constexpr int KB = 1024;
 constexpr int MB = KB * 1024;
 constexpr int GB = MB * 1024;
+constexpr int64_t TB = static_cast<int64_t>(GB) * 1024;
 
 // Determine whether we are running in a simulated environment.
 // Setting USE_SIMULATOR explicitly from the build script will force
@@ -103,13 +104,18 @@ STATIC_ASSERT(V8_DEFAULT_STACK_SIZE_KB* KB +
                   kStackLimitSlackForDeoptimizationInBytes <=
               MB);
 
-// Determine whether the short builtin calls optimization is enabled.
-#ifdef V8_SHORT_BUILTIN_CALLS
-#ifndef V8_COMPRESS_POINTERS
-// TODO(11527): Fix this by passing Isolate* to Code::OffHeapInstructionStart()
-// and friends.
-#error Short builtin calls feature requires pointer compression
-#endif
+// The V8_ENABLE_NEAR_CODE_RANGE_BOOL enables logic that tries to allocate
+// code range within a pc-relative call/jump proximity from embedded builtins.
+// This machinery could help only when we have an opportunity to choose where
+// to allocate code range and could benefit from it. This is the case for the
+// following configurations:
+// - external code space AND pointer compression are enabled,
+// - short builtin calls feature is enabled while pointer compression is not.
+#if (defined(V8_SHORT_BUILTIN_CALLS) && !defined(V8_COMPRESS_POINTERS)) || \
+    defined(V8_EXTERNAL_CODE_SPACE)
+#define V8_ENABLE_NEAR_CODE_RANGE_BOOL true
+#else
+#define V8_ENABLE_NEAR_CODE_RANGE_BOOL false
 #endif
 
 // This constant is used for detecting whether the machine has >= 4GB of
@@ -759,15 +765,13 @@ struct SlotTraits {
   using TMaybeObjectSlot = CompressedMaybeObjectSlot;
   using THeapObjectSlot = CompressedHeapObjectSlot;
   using TOffHeapObjectSlot = OffHeapCompressedObjectSlot;
-  // TODO(v8:11880): switch to OffHeapCompressedObjectSlot.
-  using TCodeObjectSlot = CompressedObjectSlot;
+  using TCodeObjectSlot = OffHeapCompressedObjectSlot;
 #else
   using TObjectSlot = FullObjectSlot;
   using TMaybeObjectSlot = FullMaybeObjectSlot;
   using THeapObjectSlot = FullHeapObjectSlot;
   using TOffHeapObjectSlot = OffHeapFullObjectSlot;
-  // TODO(v8:11880): switch to OffHeapFullObjectSlot.
-  using TCodeObjectSlot = FullObjectSlot;
+  using TCodeObjectSlot = OffHeapFullObjectSlot;
 #endif
 };
 
@@ -831,9 +835,8 @@ enum class AllocationType : uint8_t {
   kCode,       // Code object allocated in CODE_SPACE or CODE_LO_SPACE
   kMap,        // Map object allocated in MAP_SPACE
   kReadOnly,   // Object allocated in RO_SPACE
-  kSharedOld,  // Regular object allocated in SHARED_OLD_SPACE or
-               // SHARED_LO_SPACE
-  kSharedMap,  // Map object in SHARED_MAP_SPACE
+  kSharedOld,  // Regular object allocated in OLD_SPACE in the shared heap
+  kSharedMap,  // Map object in MAP_SPACE in the shared heap
 };
 
 inline size_t hash_value(AllocationType kind) {
@@ -865,8 +868,27 @@ inline constexpr bool IsSharedAllocationType(AllocationType kind) {
          kind == AllocationType::kSharedMap;
 }
 
-// TODO(ishell): review and rename kWordAligned to kTaggedAligned.
-enum AllocationAlignment { kWordAligned, kDoubleAligned, kDoubleUnaligned };
+enum AllocationAlignment {
+  // The allocated address is kTaggedSize aligned (this is default for most of
+  // the allocations).
+  kTaggedAligned,
+  // The allocated address is kDoubleSize aligned.
+  kDoubleAligned,
+  // The (allocated address + kTaggedSize) is kDoubleSize aligned.
+  kDoubleUnaligned
+};
+
+#ifdef V8_HOST_ARCH_32_BIT
+#define USE_ALLOCATION_ALIGNMENT_BOOL true
+#else
+#ifdef V8_COMPRESS_POINTERS
+// TODO(ishell, v8:8875): Consider using aligned allocations once the
+// allocation alignment inconsistency is fixed. For now we keep using
+// unaligned access since both x64 and arm64 architectures (where pointer
+// compression is supported) allow unaligned access to doubles and full words.
+#endif  // V8_COMPRESS_POINTERS
+#define USE_ALLOCATION_ALIGNMENT_BOOL false
+#endif  // V8_HOST_ARCH_32_BIT
 
 enum class AccessMode { ATOMIC, NON_ATOMIC };
 
@@ -919,6 +941,12 @@ enum class REPLMode {
 inline REPLMode construct_repl_mode(bool is_repl_mode) {
   return is_repl_mode ? REPLMode::kYes : REPLMode::kNo;
 }
+
+// Indicates whether a script is parsed during debugging.
+enum class ParsingWhileDebugging {
+  kYes,
+  kNo,
+};
 
 // Flag indicating whether code is built into the VM (one of the natives files).
 enum NativesFlag { NOT_NATIVES_CODE, EXTENSION_CODE, INSPECTOR_CODE };
@@ -1606,7 +1634,7 @@ inline std::ostream& operator<<(std::ostream& os,
 
 using FileAndLine = std::pair<const char*, int>;
 
-enum OptimizationMarker : int32_t {
+enum class OptimizationMarker : int32_t {
   // These values are set so that it is easy to check if there is a marker where
   // some processing needs to be done.
   kNone = 0b000,
@@ -1619,8 +1647,11 @@ enum OptimizationMarker : int32_t {
 // For kNone or kInOptimizationQueue we don't need any special processing.
 // To check both cases using a single mask, we expect the kNone to be 0 and
 // kInOptimizationQueue to be 1 so that we can mask off the lsb for checking.
-STATIC_ASSERT(kNone == 0b000 && kInOptimizationQueue == 0b001);
-STATIC_ASSERT(kLastOptimizationMarker <= 0b111);
+STATIC_ASSERT(static_cast<int>(OptimizationMarker::kNone) == 0b000 &&
+              static_cast<int>(OptimizationMarker::kInOptimizationQueue) ==
+                  0b001);
+STATIC_ASSERT(static_cast<int>(OptimizationMarker::kLastOptimizationMarker) <=
+              0b111);
 static constexpr uint32_t kNoneOrInOptimizationQueueMask = 0b110;
 
 inline bool IsInOptimizationQueueMarker(OptimizationMarker marker) {
@@ -1753,7 +1784,7 @@ inline bool IsGrowStoreMode(KeyedAccessStoreMode store_mode) {
   return store_mode == STORE_AND_GROW_HANDLE_COW;
 }
 
-enum IcCheckType { ELEMENT, PROPERTY };
+enum class IcCheckType { kElement, kProperty };
 
 // Helper stubs can be called in different ways depending on where the target
 // code is located and how the call sequence is expected to look like:
@@ -1871,6 +1902,15 @@ enum PropertiesEnumerationMode {
   kEnumerationOrder,
   // Order of property addition
   kPropertyAdditionOrder,
+};
+
+enum class StringTransitionStrategy {
+  // The string must be transitioned to a new representation by first copying.
+  kCopy,
+  // The string can be transitioned in-place by changing its map.
+  kInPlace,
+  // The string is already transitioned to the desired representation.
+  kAlreadyTransitioned
 };
 
 }  // namespace internal

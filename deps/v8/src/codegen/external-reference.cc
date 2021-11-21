@@ -198,15 +198,31 @@ ExternalReference ExternalReference::isolate_address(Isolate* isolate) {
   return ExternalReference(isolate);
 }
 
-ExternalReference ExternalReference::builtins_address(Isolate* isolate) {
-  return ExternalReference(
-      isolate->heap()->builtin_address(Builtins::FromInt(0)));
+ExternalReference ExternalReference::builtins_table(Isolate* isolate) {
+  return ExternalReference(isolate->builtin_table());
 }
+
+#ifdef V8_EXTERNAL_CODE_SPACE
+ExternalReference ExternalReference::builtins_code_data_container_table(
+    Isolate* isolate) {
+  return ExternalReference(isolate->builtin_code_data_container_table());
+}
+#endif  // V8_EXTERNAL_CODE_SPACE
 
 ExternalReference ExternalReference::handle_scope_implementer_address(
     Isolate* isolate) {
   return ExternalReference(isolate->handle_scope_implementer_address());
 }
+
+#ifdef V8_VIRTUAL_MEMORY_CAGE
+ExternalReference ExternalReference::virtual_memory_cage_base_address() {
+  return ExternalReference(GetProcessWideVirtualMemoryCage()->base_address());
+}
+
+ExternalReference ExternalReference::virtual_memory_cage_end_address() {
+  return ExternalReference(GetProcessWideVirtualMemoryCage()->end_address());
+}
+#endif
 
 #ifdef V8_HEAP_SANDBOX
 ExternalReference ExternalReference::external_pointer_table_address(
@@ -292,12 +308,6 @@ struct IsValidExternalReferenceType<Result (Class::*)(Args...)> {
 
 #define FUNCTION_REFERENCE(Name, Target)                                   \
   ExternalReference ExternalReference::Name() {                            \
-    STATIC_ASSERT(IsValidExternalReferenceType<decltype(&Target)>::value); \
-    return ExternalReference(Redirect(FUNCTION_ADDR(Target)));             \
-  }
-
-#define FUNCTION_REFERENCE_WITH_ISOLATE(Name, Target)                      \
-  ExternalReference ExternalReference::Name(Isolate* isolate) {            \
     STATIC_ASSERT(IsValidExternalReferenceType<decltype(&Target)>::value); \
     return ExternalReference(Redirect(FUNCTION_ADDR(Target)));             \
   }
@@ -719,11 +729,10 @@ ExternalReference ExternalReference::invoke_accessor_getter_callback() {
 UNREACHABLE();
 #endif
 
-FUNCTION_REFERENCE_WITH_ISOLATE(re_check_stack_guard_state, re_stack_check_func)
+FUNCTION_REFERENCE(re_check_stack_guard_state, re_stack_check_func)
 #undef re_stack_check_func
 
-FUNCTION_REFERENCE_WITH_ISOLATE(re_grow_stack,
-                                NativeRegExpMacroAssembler::GrowStack)
+FUNCTION_REFERENCE(re_grow_stack, NativeRegExpMacroAssembler::GrowStack)
 
 FUNCTION_REFERENCE(re_match_for_call_from_js,
                    IrregexpInterpreter::MatchForCallFromJs)
@@ -731,15 +740,16 @@ FUNCTION_REFERENCE(re_match_for_call_from_js,
 FUNCTION_REFERENCE(re_experimental_match_for_call_from_js,
                    ExperimentalRegExp::MatchForCallFromJs)
 
-FUNCTION_REFERENCE_WITH_ISOLATE(
-    re_case_insensitive_compare_unicode,
-    NativeRegExpMacroAssembler::CaseInsensitiveCompareUnicode)
+FUNCTION_REFERENCE(re_case_insensitive_compare_unicode,
+                   NativeRegExpMacroAssembler::CaseInsensitiveCompareUnicode)
 
-FUNCTION_REFERENCE_WITH_ISOLATE(
-    re_case_insensitive_compare_non_unicode,
-    NativeRegExpMacroAssembler::CaseInsensitiveCompareNonUnicode)
+FUNCTION_REFERENCE(re_case_insensitive_compare_non_unicode,
+                   NativeRegExpMacroAssembler::CaseInsensitiveCompareNonUnicode)
 
-ExternalReference ExternalReference::re_word_character_map(Isolate* isolate) {
+FUNCTION_REFERENCE(re_is_character_in_range_array,
+                   RegExpMacroAssembler::IsCharacterInRangeArray)
+
+ExternalReference ExternalReference::re_word_character_map() {
   return ExternalReference(
       NativeRegExpMacroAssembler::word_character_map_address());
 }
@@ -998,6 +1008,17 @@ ExternalReference ExternalReference::intl_to_latin1_lower_table() {
   uint8_t* ptr = const_cast<uint8_t*>(Intl::ToLatin1LowerTable());
   return ExternalReference(reinterpret_cast<Address>(ptr));
 }
+
+ExternalReference ExternalReference::intl_ascii_collation_weights_l1() {
+  uint8_t* ptr = const_cast<uint8_t*>(Intl::AsciiCollationWeightsL1());
+  return ExternalReference(reinterpret_cast<Address>(ptr));
+}
+
+ExternalReference ExternalReference::intl_ascii_collation_weights_l3() {
+  uint8_t* ptr = const_cast<uint8_t*>(Intl::AsciiCollationWeightsL3());
+  return ExternalReference(reinterpret_cast<Address>(ptr));
+}
+
 #endif  // V8_INTL_SUPPORT
 
 // Explicit instantiations for all combinations of 1- and 2-byte strings.
@@ -1380,7 +1401,6 @@ void abort_with_reason(int reason) {
 }
 
 #undef FUNCTION_REFERENCE
-#undef FUNCTION_REFERENCE_WITH_ISOLATE
 #undef FUNCTION_REFERENCE_WITH_TYPE
 
 }  // namespace internal

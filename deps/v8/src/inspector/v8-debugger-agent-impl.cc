@@ -428,6 +428,7 @@ Response V8DebuggerAgentImpl::disable() {
   for (const auto& it : m_debuggerBreakpointIdToBreakpointId) {
     v8::debug::RemoveBreakpoint(m_isolate, it.first);
   }
+  m_breakpointsOnScriptRun.clear();
   m_breakpointIdToDebuggerBreakpointIds.clear();
   m_debuggerBreakpointIdToBreakpointId.clear();
   m_debugger->setAsyncCallStackDepth(this, 0);
@@ -733,6 +734,7 @@ void V8DebuggerAgentImpl::removeBreakpointImpl(
 #endif  // V8_ENABLE_WEBASSEMBLY
     v8::debug::RemoveBreakpoint(m_isolate, id);
     m_debuggerBreakpointIdToBreakpointId.erase(id);
+    m_breakpointsOnScriptRun.erase(id);
   }
   m_breakpointIdToDebuggerBreakpointIds.erase(breakpointId);
 }
@@ -1126,14 +1128,14 @@ void V8DebuggerAgentImpl::cancelPauseOnNextStatement() {
 Response V8DebuggerAgentImpl::pause() {
   if (!enabled()) return Response::ServerError(kDebuggerNotEnabled);
   if (isPaused()) return Response::Success();
+
+  pushBreakDetails(protocol::Debugger::Paused::ReasonEnum::Other, nullptr);
   if (m_debugger->canBreakProgram()) {
     m_debugger->interruptAndBreak(m_session->contextGroupId());
   } else {
-    if (m_breakReason.empty()) {
-      m_debugger->setPauseOnNextCall(true, m_session->contextGroupId());
-    }
-    pushBreakDetails(protocol::Debugger::Paused::ReasonEnum::Other, nullptr);
+    m_debugger->setPauseOnNextCall(true, m_session->contextGroupId());
   }
+
   return Response::Success();
 }
 
@@ -1779,14 +1781,23 @@ void V8DebuggerAgentImpl::didPause(
   }
 
   auto hitBreakpointIds = std::make_unique<Array<String16>>();
-
+  bool hitInstrumentationBreakpoint = false;
+  bool hitRegularBreakpoint = false;
   for (const auto& id : hitBreakpoints) {
     auto it = m_breakpointsOnScriptRun.find(id);
     if (it != m_breakpointsOnScriptRun.end()) {
-      hitReasons.push_back(std::make_pair(
-          protocol::Debugger::Paused::ReasonEnum::Instrumentation,
-          std::move(it->second)));
-      m_breakpointsOnScriptRun.erase(it);
+      if (!hitInstrumentationBreakpoint) {
+        // We may hit several instrumentation breakpoints: 1. they are
+        // kept around, and 2. each session may set their own.
+        // Only report one.
+        // TODO(kimanh): This will not be needed anymore if we
+        // make sure that we can only hit an instrumentation
+        // breakpoint once. This workaround is currently for wasm.
+        hitInstrumentationBreakpoint = true;
+        hitReasons.push_back(std::make_pair(
+            protocol::Debugger::Paused::ReasonEnum::Instrumentation,
+            std::move(it->second)));
+      }
       continue;
     }
     auto breakpointIterator = m_debuggerBreakpointIdToBreakpointId.find(id);
@@ -1797,16 +1808,25 @@ void V8DebuggerAgentImpl::didPause(
     hitBreakpointIds->emplace_back(breakpointId);
     BreakpointType type;
     parseBreakpointId(breakpointId, &type);
-    if (type != BreakpointType::kDebugCommand) continue;
-    hitReasons.push_back(std::make_pair(
-        protocol::Debugger::Paused::ReasonEnum::DebugCommand, nullptr));
+    if (type == BreakpointType::kDebugCommand) {
+      hitReasons.push_back(std::make_pair(
+          protocol::Debugger::Paused::ReasonEnum::DebugCommand, nullptr));
+    } else {
+      hitRegularBreakpoint = true;
+    }
   }
 
+  if (hitRegularBreakpoint) {
+    hitReasons.push_back(
+        std::make_pair(protocol::Debugger::Paused::ReasonEnum::Other, nullptr));
+  }
   for (size_t i = 0; i < m_breakReason.size(); ++i) {
     hitReasons.push_back(std::move(m_breakReason[i]));
   }
   clearBreakDetails();
 
+  // TODO(kimanh): We should always know why we pause. Print a
+  // warning if we don't and fall back to Other.
   String16 breakReason = protocol::Debugger::Paused::ReasonEnum::Other;
   std::unique_ptr<protocol::DictionaryValue> breakAuxData;
   if (hitReasons.size() == 1) {

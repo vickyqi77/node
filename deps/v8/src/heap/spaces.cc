@@ -130,11 +130,12 @@ size_t Page::AvailableInFreeList() {
 namespace {
 // Skips filler starting from the given filler until the end address.
 // Returns the first address after the skipped fillers.
-Address SkipFillers(HeapObject filler, Address end) {
+Address SkipFillers(PtrComprCageBase cage_base, HeapObject filler,
+                    Address end) {
   Address addr = filler.address();
   while (addr < end) {
     filler = HeapObject::FromAddress(addr);
-    CHECK(filler.IsFreeSpaceOrFiller());
+    CHECK(filler.IsFreeSpaceOrFiller(cage_base));
     addr = filler.address() + filler.Size();
   }
   return addr;
@@ -152,9 +153,10 @@ size_t Page::ShrinkToHighWaterMark() {
   // or the area_end.
   HeapObject filler = HeapObject::FromAddress(HighWaterMark());
   if (filler.address() == area_end()) return 0;
-  CHECK(filler.IsFreeSpaceOrFiller());
+  PtrComprCageBase cage_base(heap()->isolate());
+  CHECK(filler.IsFreeSpaceOrFiller(cage_base));
   // Ensure that no objects were allocated in [filler, area_end) region.
-  DCHECK_EQ(area_end(), SkipFillers(filler, area_end()));
+  DCHECK_EQ(area_end(), SkipFillers(cage_base, filler, area_end()));
   // Ensure that no objects will be allocated on this page.
   DCHECK_EQ(0u, AvailableInFreeList());
 
@@ -181,7 +183,7 @@ size_t Page::ShrinkToHighWaterMark() {
     heap()->memory_allocator()->PartialFreeMemory(
         this, address() + size() - unused, unused, area_end() - unused);
     if (filler.address() != area_end()) {
-      CHECK(filler.IsFreeSpaceOrFiller());
+      CHECK(filler.IsFreeSpaceOrFiller(cage_base));
       CHECK_EQ(filler.address() + filler.Size(), area_end());
     }
   }
@@ -323,14 +325,7 @@ void LocalAllocationBuffer::MakeIterable() {
 LocalAllocationBuffer::LocalAllocationBuffer(
     Heap* heap, LinearAllocationArea allocation_info) V8_NOEXCEPT
     : heap_(heap),
-      allocation_info_(allocation_info) {
-  if (IsValid()) {
-    heap_->CreateFillerObjectAtBackground(
-        allocation_info_.top(),
-        static_cast<int>(allocation_info_.limit() - allocation_info_.top()),
-        ClearFreedMemoryMode::kDontClearFreedMemory);
-  }
-}
+      allocation_info_(allocation_info) {}
 
 LocalAllocationBuffer::LocalAllocationBuffer(LocalAllocationBuffer&& other)
     V8_NOEXCEPT {

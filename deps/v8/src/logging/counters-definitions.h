@@ -130,6 +130,11 @@ namespace internal {
   HT(compile_script, V8.CompileScriptMicroSeconds, 1000000, MICROSECOND)      \
   /* Time for lazily compiling Wasm functions. */                             \
   HT(wasm_lazy_compile_time, V8.WasmLazyCompileTimeMicroSeconds, 100000000,   \
+     MICROSECOND)                                                             \
+  /* Total time to decompress isolate snapshot. */                            \
+  HT(snapshot_decompress, V8.SnapshotDecompress, 10000000, MICROSECOND)       \
+  /* Time to decompress context snapshot. */                                  \
+  HT(context_snapshot_decompress, V8.ContextSnapshotDecompress, 10000000,     \
      MICROSECOND)
 
 #define NESTED_TIMED_HISTOGRAM_LIST_SLOW(HT)                               \
@@ -158,6 +163,8 @@ namespace internal {
   HT(gc_scavenger_foreground, V8.GCScavengerForeground, 10000, MILLISECOND)    \
   HT(measure_memory_delay_ms, V8.MeasureMemoryDelayMilliseconds, 100000,       \
      MILLISECOND)                                                              \
+  HT(gc_time_to_global_safepoint, V8.GC.TimeToGlobalSafepoint, 10000000,       \
+     MICROSECOND)                                                              \
   HT(gc_time_to_safepoint, V8.GC.TimeToSafepoint, 10000000, MICROSECOND)       \
   HT(gc_time_to_collection_on_background, V8.GC.TimeToCollectionOnBackground,  \
      10000000, MICROSECOND)                                                    \
@@ -299,9 +306,7 @@ namespace internal {
   SC(contexts_created_by_snapshot, V8.ContextsCreatedBySnapshot)   \
   /* Number of code objects found from pc. */                      \
   SC(pc_to_code, V8.PcToCode)                                      \
-  SC(pc_to_code_cached, V8.PcToCodeCached)                         \
-  /* The store-buffer implementation of the write barrier. */      \
-  SC(store_buffer_overflows, V8.StoreBufferOverflows)
+  SC(pc_to_code_cached, V8.PcToCodeCached)
 
 #define STATS_COUNTER_LIST_2(SC)                                               \
   /* Amount of (JS) compiled code. */                                          \

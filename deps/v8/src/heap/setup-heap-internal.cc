@@ -42,6 +42,7 @@
 #include "src/objects/synthetic-module.h"
 #include "src/objects/template-objects-inl.h"
 #include "src/objects/torque-defined-classes-inl.h"
+#include "src/objects/turbofan-types.h"
 #include "src/regexp/regexp.h"
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -188,7 +189,7 @@ AllocationResult Heap::AllocatePartialMap(InstanceType instance_type,
 
 void Heap::FinalizePartialMap(Map map) {
   ReadOnlyRoots roots(this);
-  map.set_dependent_code(DependentCode::cast(roots.empty_weak_fixed_array()));
+  map.set_dependent_code(DependentCode::empty_dependent_code(roots));
   map.set_raw_transitions(MaybeObject::FromSmi(Smi::zero()));
   map.SetInstanceDescriptors(isolate(), roots.empty_descriptor_array(), 0);
   map.set_prototype(roots.null_value());
@@ -506,6 +507,8 @@ bool Heap::CreateInitialMaps() {
             WasmCapiFunctionData::kSize, wasm_capi_function_data)
     IF_WASM(ALLOCATE_MAP, WASM_EXPORTED_FUNCTION_DATA_TYPE,
             WasmExportedFunctionData::kSize, wasm_exported_function_data)
+    IF_WASM(ALLOCATE_MAP, WASM_API_FUNCTION_REF_TYPE, WasmApiFunctionRef::kSize,
+            wasm_api_function_ref)
     IF_WASM(ALLOCATE_MAP, WASM_JS_FUNCTION_DATA_TYPE, WasmJSFunctionData::kSize,
             wasm_js_function_data)
     IF_WASM(ALLOCATE_MAP, WASM_TYPE_INFO_TYPE, WasmTypeInfo::kSize,
@@ -801,6 +804,9 @@ void Heap::CreateInitialObjects() {
   set_feedback_vectors_for_profiling_tools(roots.undefined_value());
   set_pending_optimize_for_test_bytecode(roots.undefined_value());
   set_shared_wasm_memories(roots.empty_weak_array_list());
+#ifdef V8_ENABLE_WEBASSEMBLY
+  set_active_continuation(roots.undefined_value());
+#endif  // V8_ENABLE_WEBASSEMBLY
 
   set_script_list(roots.empty_weak_array_list());
 

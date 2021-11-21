@@ -14,6 +14,7 @@
 #include "src/codegen/assembler-inl.h"
 #include "src/codegen/compilation-cache.h"
 #include "src/codegen/compiler.h"
+#include "src/common/assert-scope.h"
 #include "src/common/globals.h"
 #include "src/common/message-template.h"
 #include "src/debug/debug-evaluate.h"
@@ -1179,14 +1180,14 @@ void Debug::PrepareStep(StepAction step_action) {
           return;
         }
 #endif  // V8_ENABLE_WEBASSEMBLY
-        JavaScriptFrame* frame = JavaScriptFrame::cast(frames_it.frame());
+        JavaScriptFrame* js_frame = JavaScriptFrame::cast(frames_it.frame());
         if (last_step_action() == StepInto) {
           // Deoptimize frame to ensure calls are checked for step-in.
-          Deoptimizer::DeoptimizeFunction(frame->function());
+          Deoptimizer::DeoptimizeFunction(js_frame->function());
         }
-        HandleScope scope(isolate_);
+        HandleScope inner_scope(isolate_);
         std::vector<Handle<SharedFunctionInfo>> infos;
-        frame->GetFunctions(&infos);
+        js_frame->GetFunctions(&infos);
         for (; !infos.empty(); current_frame_count--) {
           Handle<SharedFunctionInfo> info = infos.back();
           infos.pop_back();
@@ -1281,6 +1282,7 @@ class DiscardBaselineCodeVisitor : public ThreadVisitor {
   DiscardBaselineCodeVisitor() : shared_(SharedFunctionInfo()) {}
 
   void VisitThread(Isolate* isolate, ThreadLocalTop* top) override {
+    DisallowGarbageCollection diallow_gc;
     bool deopt_all = shared_ == SharedFunctionInfo();
     for (JavaScriptFrameIterator it(isolate, top); !it.done(); it.Advance()) {
       if (!deopt_all && it.frame()->function().shared() != shared_) continue;
@@ -1319,7 +1321,6 @@ class DiscardBaselineCodeVisitor : public ThreadVisitor {
 
  private:
   SharedFunctionInfo shared_;
-  DISALLOW_GARBAGE_COLLECTION(no_gc_)
 };
 }  // namespace
 
@@ -1810,7 +1811,7 @@ bool Debug::EnsureBreakInfo(Handle<SharedFunctionInfo> shared) {
   IsCompiledScope is_compiled_scope = shared->is_compiled_scope(isolate_);
   if (!is_compiled_scope.is_compiled() &&
       !Compiler::Compile(isolate_, shared, Compiler::CLEAR_EXCEPTION,
-                         &is_compiled_scope)) {
+                         &is_compiled_scope, CreateSourcePositions::kYes)) {
     return false;
   }
   CreateBreakInfo(shared);
@@ -2160,7 +2161,7 @@ namespace {
 debug::Location GetDebugLocation(Handle<Script> script, int source_position) {
   Script::PositionInfo info;
   Script::GetPositionInfo(script, source_position, &info, Script::WITH_OFFSET);
-  // V8 provides ScriptCompiler::CompileFunctionInContext method which takes
+  // V8 provides ScriptCompiler::CompileFunction method which takes
   // expression and compile it as anonymous function like (function() ..
   // expression ..). To produce correct locations for stmts inside of this
   // expression V8 compile this function with negative offset. Instead of stmt

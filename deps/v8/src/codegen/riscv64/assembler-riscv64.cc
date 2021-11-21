@@ -798,7 +798,7 @@ int Assembler::AuipcOffset(Instr instr) {
 // space.  There is no guarantee that the relocated location can be similarly
 // encoded.
 bool Assembler::MustUseReg(RelocInfo::Mode rmode) {
-  return !RelocInfo::IsNone(rmode);
+  return !RelocInfo::IsNoInfo(rmode);
 }
 
 void Assembler::disassembleInstr(Instr instr) {
@@ -1167,6 +1167,17 @@ void Assembler::GenInstrV(uint8_t funct6, Opcode opcode, Register rd,
   DCHECK(opcode == OP_MVV || opcode == OP_FVV);
   Instr instr = (funct6 << kRvvFunct6Shift) | opcode | (mask << kRvvVmShift) |
                 ((rd.code() & 0x1F) << kRvvVdShift) |
+                ((vs1.code() & 0x1F) << kRvvVs1Shift) |
+                ((vs2.code() & 0x1F) << kRvvVs2Shift);
+  emit(instr);
+}
+
+// OPFVV
+void Assembler::GenInstrV(uint8_t funct6, Opcode opcode, FPURegister fd,
+                          VRegister vs1, VRegister vs2, MaskType mask) {
+  DCHECK(opcode == OP_FVV);
+  Instr instr = (funct6 << kRvvFunct6Shift) | opcode | (mask << kRvvVmShift) |
+                ((fd.code() & 0x1F) << kRvvVdShift) |
                 ((vs1.code() & 0x1F) << kRvvVs1Shift) |
                 ((vs2.code() & 0x1F) << kRvvVs2Shift);
   emit(instr);
@@ -2561,6 +2572,32 @@ void Assembler::vrgather_vx(VRegister vd, VRegister vs2, Register rs1,
     GenInstrV(funct6, OP_FVF, vd, fs1, vs2, mask);                        \
   }
 
+#define DEFINE_OPFVV_FMA(name, funct6)                                  \
+  void Assembler::name##_vv(VRegister vd, VRegister vs1, VRegister vs2, \
+                            MaskType mask) {                            \
+    GenInstrV(funct6, OP_FVV, vd, vs1, vs2, mask);                      \
+  }
+
+#define DEFINE_OPFVF_FMA(name, funct6)                                    \
+  void Assembler::name##_vf(VRegister vd, FPURegister fs1, VRegister vs2, \
+                            MaskType mask) {                              \
+    GenInstrV(funct6, OP_FVF, vd, fs1, vs2, mask);                        \
+  }
+
+// vector integer extension
+#define DEFINE_OPMVV_VIE(name, vs1)                                  \
+  void Assembler::name(VRegister vd, VRegister vs2, MaskType mask) { \
+    GenInstrV(VXUNARY0_FUNCT6, OP_MVV, vd, vs1, vs2, mask);          \
+  }
+
+void Assembler::vfmv_vf(VRegister vd, FPURegister fs1, MaskType mask) {
+  GenInstrV(VMV_FUNCT6, OP_FVF, vd, fs1, v0, mask);
+}
+
+void Assembler::vfmv_fs(FPURegister fd, VRegister vs2, MaskType mask) {
+  GenInstrV(VWFUNARY0_FUNCT6, OP_FVV, fd, v0, vs2, mask);
+}
+
 DEFINE_OPIVV(vadd, VADD_FUNCT6)
 DEFINE_OPIVX(vadd, VADD_FUNCT6)
 DEFINE_OPIVI(vadd, VADD_FUNCT6)
@@ -2663,11 +2700,49 @@ DEFINE_OPFVV(vfsngjn, VFSGNJN_FUNCT6)
 DEFINE_OPFVF(vfsngjn, VFSGNJN_FUNCT6)
 DEFINE_OPFVV(vfsngjx, VFSGNJX_FUNCT6)
 DEFINE_OPFVF(vfsngjx, VFSGNJX_FUNCT6)
+
+// Vector Single-Width Floating-Point Fused Multiply-Add Instructions
+DEFINE_OPFVV_FMA(vfmadd, VFMADD_FUNCT6)
+DEFINE_OPFVF_FMA(vfmadd, VFMADD_FUNCT6)
+DEFINE_OPFVV_FMA(vfmsub, VFMSUB_FUNCT6)
+DEFINE_OPFVF_FMA(vfmsub, VFMSUB_FUNCT6)
+DEFINE_OPFVV_FMA(vfmacc, VFMACC_FUNCT6)
+DEFINE_OPFVF_FMA(vfmacc, VFMACC_FUNCT6)
+DEFINE_OPFVV_FMA(vfmsac, VFMSAC_FUNCT6)
+DEFINE_OPFVF_FMA(vfmsac, VFMSAC_FUNCT6)
+DEFINE_OPFVV_FMA(vfnmadd, VFNMADD_FUNCT6)
+DEFINE_OPFVF_FMA(vfnmadd, VFNMADD_FUNCT6)
+DEFINE_OPFVV_FMA(vfnmsub, VFNMSUB_FUNCT6)
+DEFINE_OPFVF_FMA(vfnmsub, VFNMSUB_FUNCT6)
+DEFINE_OPFVV_FMA(vfnmacc, VFNMACC_FUNCT6)
+DEFINE_OPFVF_FMA(vfnmacc, VFNMACC_FUNCT6)
+DEFINE_OPFVV_FMA(vfnmsac, VFNMSAC_FUNCT6)
+DEFINE_OPFVF_FMA(vfnmsac, VFNMSAC_FUNCT6)
+
+// Vector Narrowing Fixed-Point Clip Instructions
+DEFINE_OPIVV(vnclip, VNCLIP_FUNCT6)
+DEFINE_OPIVX(vnclip, VNCLIP_FUNCT6)
+DEFINE_OPIVI(vnclip, VNCLIP_FUNCT6)
+DEFINE_OPIVV(vnclipu, VNCLIPU_FUNCT6)
+DEFINE_OPIVX(vnclipu, VNCLIPU_FUNCT6)
+DEFINE_OPIVI(vnclipu, VNCLIPU_FUNCT6)
+
+// Vector Integer Extension
+DEFINE_OPMVV_VIE(vzext_vf8, 0b00010)
+DEFINE_OPMVV_VIE(vsext_vf8, 0b00011)
+DEFINE_OPMVV_VIE(vzext_vf4, 0b00100)
+DEFINE_OPMVV_VIE(vsext_vf4, 0b00101)
+DEFINE_OPMVV_VIE(vzext_vf2, 0b00110)
+DEFINE_OPMVV_VIE(vsext_vf2, 0b00111)
+
 #undef DEFINE_OPIVI
 #undef DEFINE_OPIVV
 #undef DEFINE_OPIVX
 #undef DEFINE_OPFVV
 #undef DEFINE_OPFVF
+#undef DEFINE_OPFVV_FMA
+#undef DEFINE_OPFVF_FMA
+#undef DEFINE_OPMVV_VIE
 
 void Assembler::vsetvli(Register rd, Register rs1, VSew vsew, Vlmul vlmul,
                         TailAgnosticType tail, MaskAgnosticType mask) {
@@ -3305,12 +3380,10 @@ int Assembler::li_estimate(int64_t imm, bool is_get_temp_reg) {
     // plus the number of zeros between the parts. Each part is added after the
     // left shift.
     uint32_t mask = 0x80000000;
-    int32_t shift_val = 0;
     int32_t i;
     for (i = 0; i < 32; i++) {
       if ((low_32 & mask) == 0) {
         mask >>= 1;
-        shift_val++;
         if (i == 31) {
           // rest is zero
           count++;
@@ -3318,21 +3391,17 @@ int Assembler::li_estimate(int64_t imm, bool is_get_temp_reg) {
         continue;
       }
       // The first 1 seen
-      int32_t part;
       if ((i + 11) < 32) {
         // Pick 11 bits
-        part = ((uint32_t)(low_32 << i) >> i) >> (32 - (i + 11));
         count++;
         count++;
         i += 10;
         mask >>= 11;
       } else {
-        part = (uint32_t)(low_32 << i) >> i;
         count++;
         count++;
         break;
       }
-      shift_val = 0;
     }
   }
   return count;
@@ -3486,28 +3555,8 @@ void Assembler::RelocateRelativeReference(RelocInfo::Mode rmode, Address pc,
   }
 }
 
-void Assembler::FixOnHeapReferences(bool update_embedded_objects) {
-  if (!update_embedded_objects) return;
-  for (auto p : saved_handles_for_raw_object_ptr_) {
-    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
-    Handle<HeapObject> object(reinterpret_cast<Address*>(p.second));
-    set_target_value_at(address, object->ptr());
-  }
-}
-
-void Assembler::FixOnHeapReferencesToHandles() {
-  for (auto p : saved_handles_for_raw_object_ptr_) {
-    Address address = reinterpret_cast<Address>(buffer_->start() + p.first);
-    set_target_value_at(address, p.second);
-  }
-  saved_handles_for_raw_object_ptr_.clear();
-}
-
 void Assembler::GrowBuffer() {
   DEBUG_PRINTF("GrowBuffer: %p -> ", buffer_start_);
-  bool previously_on_heap = buffer_->IsOnHeap();
-  int previous_on_heap_gc_count = OnHeapGCCount();
-
   // Compute new buffer size.
   int old_size = buffer_->size();
   int new_size = std::min(2 * old_size, old_size + 1 * MB);
@@ -3550,15 +3599,6 @@ void Assembler::GrowBuffer() {
     }
   }
 
-  // Fix on-heap references.
-  if (previously_on_heap) {
-    if (buffer_->IsOnHeap()) {
-      FixOnHeapReferences(previous_on_heap_gc_count != OnHeapGCCount());
-    } else {
-      FixOnHeapReferencesToHandles();
-    }
-  }
-
   DCHECK(!overflow());
 }
 
@@ -3569,7 +3609,7 @@ void Assembler::db(uint8_t data) {
 }
 
 void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
-  if (!RelocInfo::IsNone(rmode)) {
+  if (!RelocInfo::IsNoInfo(rmode)) {
     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
            RelocInfo::IsLiteralConstant(rmode));
     RecordRelocInfo(rmode);
@@ -3580,7 +3620,7 @@ void Assembler::dd(uint32_t data, RelocInfo::Mode rmode) {
 }
 
 void Assembler::dq(uint64_t data, RelocInfo::Mode rmode) {
-  if (!RelocInfo::IsNone(rmode)) {
+  if (!RelocInfo::IsNoInfo(rmode)) {
     DCHECK(RelocInfo::IsDataEmbeddedObject(rmode) ||
            RelocInfo::IsLiteralConstant(rmode));
     RecordRelocInfo(rmode);

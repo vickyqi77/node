@@ -143,8 +143,9 @@ DeclarationScope::DeclarationScope(Zone* zone,
                                    AstValueFactory* ast_value_factory,
                                    REPLMode repl_mode)
     : Scope(zone),
-      function_kind_(repl_mode == REPLMode::kYes ? kAsyncFunction
-                                                 : kNormalFunction),
+      function_kind_(repl_mode == REPLMode::kYes
+                         ? FunctionKind::kAsyncFunction
+                         : FunctionKind::kNormalFunction),
       params_(4, zone) {
   DCHECK_EQ(scope_type_, SCRIPT_SCOPE);
   SetDefaults();
@@ -165,7 +166,8 @@ DeclarationScope::DeclarationScope(Zone* zone, Scope* outer_scope,
 
 ModuleScope::ModuleScope(DeclarationScope* script_scope,
                          AstValueFactory* avfactory)
-    : DeclarationScope(avfactory->zone(), script_scope, MODULE_SCOPE, kModule),
+    : DeclarationScope(avfactory->zone(), script_scope, MODULE_SCOPE,
+                       FunctionKind::kModule),
       module_descriptor_(avfactory->zone()->New<SourceTextModuleDescriptor>(
           avfactory->zone())) {
   set_language_mode(LanguageMode::kStrict);
@@ -212,7 +214,9 @@ ClassScope::ClassScope(Isolate* isolate, Zone* zone,
     DCHECK_EQ(scope_info->ContextLocalMaybeAssignedFlag(index),
               MaybeAssignedFlag::kMaybeAssigned);
     Variable* var = DeclareClassVariable(
-        ast_value_factory, ast_value_factory->GetString(handle(name, isolate)),
+        ast_value_factory,
+        ast_value_factory->GetString(name,
+                                     SharedStringAccessGuardIfNeeded(isolate)),
         kNoSourcePosition);
     var->AllocateTo(VariableLocation::CONTEXT,
                     Context::MIN_CONTEXT_SLOTS + index);
@@ -460,9 +464,11 @@ Scope* Scope::DeserializeScopeChain(Isolate* isolate, Zone* zone,
       String name = scope_info.ContextLocalName(0);
       MaybeAssignedFlag maybe_assigned =
           scope_info.ContextLocalMaybeAssignedFlag(0);
-      outer_scope = zone->New<Scope>(
-          zone, ast_value_factory->GetString(handle(name, isolate)),
-          maybe_assigned, handle(scope_info, isolate));
+      outer_scope =
+          zone->New<Scope>(zone,
+                           ast_value_factory->GetString(
+                               name, SharedStringAccessGuardIfNeeded(isolate)),
+                           maybe_assigned, handle(scope_info, isolate));
     }
     if (deserialization_mode == DeserializationMode::kScopesOnly) {
       outer_scope->scope_info_ = Handle<ScopeInfo>::null();
@@ -679,6 +685,7 @@ void DeclarationScope::DeclareThis(AstValueFactory* ast_value_factory) {
       THIS_VARIABLE,
       derived_constructor ? kNeedsInitialization : kCreatedInitialized,
       kNotAssigned);
+  locals_.Add(receiver_);
 }
 
 void DeclarationScope::DeclareArguments(AstValueFactory* ast_value_factory) {
@@ -1818,7 +1825,7 @@ void Scope::Print(int n) {
   // Print header.
   FunctionKind function_kind = is_function_scope()
                                    ? AsDeclarationScope()->function_kind()
-                                   : kNormalFunction;
+                                   : FunctionKind::kNormalFunction;
   Indent(n0, Header(scope_type_, function_kind, is_declaration_scope()));
   if (scope_name_ != nullptr && !scope_name_->IsEmpty()) {
     PrintF(" ");
@@ -2487,10 +2494,10 @@ void Scope::AllocateVariablesRecursively() {
     // Allocate variables for this scope.
     // Parameters must be allocated first, if any.
     if (scope->is_declaration_scope()) {
+      scope->AsDeclarationScope()->AllocateReceiver();
       if (scope->is_function_scope()) {
         scope->AsDeclarationScope()->AllocateParameterLocals();
       }
-      scope->AsDeclarationScope()->AllocateReceiver();
     }
     scope->AllocateNonParameterLocalsAndDeclaredGlobals();
 

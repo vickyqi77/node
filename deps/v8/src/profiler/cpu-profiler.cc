@@ -234,7 +234,7 @@ void SamplingEventsProcessor::SymbolizeAndAddToProfiles(
       symbolizer_->SymbolizeTickSample(record->sample);
   profiles_->AddPathToCurrentProfiles(
       record->sample.timestamp, symbolized.stack_trace, symbolized.src_line,
-      record->sample.update_stats, record->sample.sampling_interval,
+      record->sample.update_stats_, record->sample.sampling_interval_,
       reinterpret_cast<Address>(record->sample.context));
 }
 
@@ -471,6 +471,16 @@ class CpuProfilersManager {
     }
   }
 
+  size_t GetAllProfilersMemorySize(Isolate* isolate) {
+    base::MutexGuard lock(&mutex_);
+    size_t estimated_memory = 0;
+    auto range = profilers_.equal_range(isolate);
+    for (auto it = range.first; it != range.second; ++it) {
+      estimated_memory += it->second->GetEstimatedMemoryUsage();
+    }
+    return estimated_memory;
+  }
+
  private:
   std::unordered_multimap<Isolate*, CpuProfiler*> profilers_;
   base::Mutex mutex_;
@@ -576,6 +586,15 @@ void CpuProfiler::CollectSample() {
   if (processor_) {
     processor_->AddCurrentStack();
   }
+}
+
+// static
+size_t CpuProfiler::GetAllProfilersMemorySize(Isolate* isolate) {
+  return GetProfilersManager()->GetAllProfilersMemorySize(isolate);
+}
+
+size_t CpuProfiler::GetEstimatedMemoryUsage() const {
+  return code_observer_->GetEstimatedMemoryUsage();
 }
 
 CpuProfilingStatus CpuProfiler::StartProfiling(

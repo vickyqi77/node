@@ -436,6 +436,8 @@ class ShellOptions {
       "enable-system-instrumentation", false};
   DisallowReassignment<const char*> web_snapshot_config = {
       "web-snapshot-config", nullptr};
+  DisallowReassignment<const char*> web_snapshot_output = {
+      "web-snapshot-output", nullptr};
   DisallowReassignment<bool> d8_web_snapshot_api = {
       "experimental-d8-web-snapshot-api", false};
   DisallowReassignment<bool> compile_only = {"compile-only", false};
@@ -460,7 +462,7 @@ class Shell : public i::AllStatic {
   enum class CodeType { kFileName, kString, kFunction, kInvalid, kNone };
 
   static bool ExecuteString(Isolate* isolate, Local<String> source,
-                            Local<Value> name, PrintResult print_result,
+                            Local<String> name, PrintResult print_result,
                             ReportExceptions report_exceptions,
                             ProcessMessageQueue process_message_queue);
   static bool ExecuteModule(Isolate* isolate, const char* file_name);
@@ -605,8 +607,9 @@ class Shell : public i::AllStatic {
   static void MakeDirectory(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void RemoveDirectory(const v8::FunctionCallbackInfo<v8::Value>& args);
   static MaybeLocal<Promise> HostImportModuleDynamically(
-      Local<Context> context, Local<ScriptOrModule> referrer,
-      Local<String> specifier, Local<FixedArray> import_assertions);
+      Local<Context> context, Local<Data> host_defined_options,
+      Local<Value> resource_name, Local<String> specifier,
+      Local<FixedArray> import_assertions);
 
   static void ModuleResolutionSuccessCallback(
       const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -630,6 +633,7 @@ class Shell : public i::AllStatic {
   static const char* kPrompt;
   static ShellOptions options;
   static ArrayBuffer::Allocator* array_buffer_allocator;
+  static Isolate* shared_isolate;
 
   static void SetWaitUntilDone(Isolate* isolate, bool value);
   static void NotifyStartStreamingTask(Isolate* isolate);

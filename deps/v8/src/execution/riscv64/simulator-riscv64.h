@@ -69,6 +69,60 @@ T Nabs(T a) {
   return a < 0 ? a : -a;
 }
 
+  template <uint64_t N>
+  struct type_usew_t;
+  template <>
+  struct type_usew_t<8> {
+    using type = uint8_t;
+  };
+
+  template <>
+  struct type_usew_t<16> {
+    using type = uint16_t;
+  };
+
+  template <>
+  struct type_usew_t<32> {
+    using type = uint32_t;
+  };
+
+  template <>
+  struct type_usew_t<64> {
+    using type = uint64_t;
+  };
+
+  template <>
+  struct type_usew_t<128> {
+    using type = __uint128_t;
+  };
+  template <uint64_t N>
+  struct type_sew_t;
+
+  template <>
+  struct type_sew_t<8> {
+    using type = int8_t;
+  };
+
+  template <>
+  struct type_sew_t<16> {
+    using type = int16_t;
+  };
+
+  template <>
+  struct type_sew_t<32> {
+    using type = int32_t;
+  };
+
+  template <>
+  struct type_sew_t<64> {
+    using type = int64_t;
+  };
+
+  template <>
+  struct type_sew_t<128> {
+    using type = __int128_t;
+  };
+
 #if defined(USE_SIMULATOR)
 // Running with a simulator.
 
@@ -672,60 +726,6 @@ class Simulator : public SimulatorBase {
   // PURPOSE. THE SOFTWARE AND ACCOMPANYING DOCUMENTATION, IF ANY, PROVIDED
   // HEREUNDER IS PROVIDED "AS IS". REGENTS HAS NO OBLIGATION TO PROVIDE
   // MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
-  template <uint64_t N>
-  struct type_usew_t;
-  template <>
-  struct type_usew_t<8> {
-    using type = uint8_t;
-  };
-
-  template <>
-  struct type_usew_t<16> {
-    using type = uint16_t;
-  };
-
-  template <>
-  struct type_usew_t<32> {
-    using type = uint32_t;
-  };
-
-  template <>
-  struct type_usew_t<64> {
-    using type = uint64_t;
-  };
-
-  template <>
-  struct type_usew_t<128> {
-    using type = __uint128_t;
-  };
-  template <uint64_t N>
-  struct type_sew_t;
-
-  template <>
-  struct type_sew_t<8> {
-    using type = int8_t;
-  };
-
-  template <>
-  struct type_sew_t<16> {
-    using type = int16_t;
-  };
-
-  template <>
-  struct type_sew_t<32> {
-    using type = int32_t;
-  };
-
-  template <>
-  struct type_sew_t<64> {
-    using type = int64_t;
-  };
-
-  template <>
-  struct type_sew_t<128> {
-    using type = __int128_t;
-  };
-
 #define VV_PARAMS(x)                                                       \
   type_sew_t<x>::type& vd =                                                \
       Rvvelt<type_sew_t<x>::type>(rvv_vd_reg(), i, true);                  \
@@ -762,6 +762,20 @@ class Simulator : public SimulatorBase {
   type_usew_t<x>::type uimm5 = (type_usew_t<x>::type)(instr_.RvvUimm5()); \
   type_usew_t<x>::type vs2 = Rvvelt<type_usew_t<x>::type>(rvv_vs2_reg(), i);
 
+#define VN_PARAMS(x)                                                    \
+  constexpr int half_x = x >> 1;                                        \
+  type_sew_t<half_x>::type& vd =                                        \
+      Rvvelt<type_sew_t<half_x>::type>(rvv_vd_reg(), i, true);          \
+  type_sew_t<x>::type uimm5 = (type_sew_t<x>::type)(instr_.RvvUimm5()); \
+  type_sew_t<x>::type vs2 = Rvvelt<type_sew_t<x>::type>(rvv_vs2_reg(), i);
+
+#define VN_UPARAMS(x)                                                     \
+  constexpr int half_x = x >> 1;                                          \
+  type_usew_t<half_x>::type& vd =                                         \
+      Rvvelt<type_usew_t<half_x>::type>(rvv_vd_reg(), i, true);           \
+  type_usew_t<x>::type uimm5 = (type_usew_t<x>::type)(instr_.RvvUimm5()); \
+  type_sew_t<x>::type vs2 = Rvvelt<type_sew_t<x>::type>(rvv_vs2_reg(), i);
+
 #define VXI_PARAMS(x)                                                       \
   type_sew_t<x>::type& vd =                                                 \
       Rvvelt<type_sew_t<x>::type>(rvv_vd_reg(), i, true);                   \
@@ -777,6 +791,17 @@ class Simulator : public SimulatorBase {
 #define VI_XI_SLIDEUP_PARAMS(x, offset)                          \
   auto& vd = Rvvelt<type_sew_t<x>::type>(rvv_vd_reg(), i, true); \
   auto vs2 = Rvvelt<type_sew_t<x>::type>(rvv_vs2_reg(), i - offset);
+
+/* Vector Integer Extension */
+#define VI_VIE_PARAMS(x, scale)                                  \
+  if ((x / scale) < 8) UNREACHABLE();                            \
+  auto& vd = Rvvelt<type_sew_t<x>::type>(rvv_vd_reg(), i, true); \
+  auto vs2 = Rvvelt<type_sew_t<x / scale>::type>(rvv_vs2_reg(), i);
+
+#define VI_VIE_UPARAMS(x, scale)                                 \
+  if ((x / scale) < 8) UNREACHABLE();                            \
+  auto& vd = Rvvelt<type_sew_t<x>::type>(rvv_vd_reg(), i, true); \
+  auto vs2 = Rvvelt<type_usew_t<x / scale>::type>(rvv_vs2_reg(), i);
 
   inline void rvv_trace_vd() {
     if (::v8::internal::FLAG_trace_sim) {
@@ -874,8 +899,23 @@ class Simulator : public SimulatorBase {
   }
 
   template <typename T, typename Func>
+  inline T CanonicalizeFPUOpFMA(Func fn, T dst, T src1, T src2) {
+    STATIC_ASSERT(std::is_floating_point<T>::value);
+    auto alu_out = fn(dst, src1, src2);
+    // if any input or result is NaN, the result is quiet_NaN
+    if (std::isnan(alu_out) || std::isnan(src1) || std::isnan(src2) ||
+        std::isnan(dst)) {
+      // signaling_nan sets kInvalidOperation bit
+      if (isSnan(alu_out) || isSnan(src1) || isSnan(src2) || isSnan(dst))
+        set_fflags(kInvalidOperation);
+      alu_out = std::numeric_limits<T>::quiet_NaN();
+    }
+    return alu_out;
+  }
+
+  template <typename T, typename Func>
   inline T CanonicalizeFPUOp3(Func fn) {
-    DCHECK(std::is_floating_point<T>::value);
+    STATIC_ASSERT(std::is_floating_point<T>::value);
     T src1 = std::is_same<float, T>::value ? frs1() : drs1();
     T src2 = std::is_same<float, T>::value ? frs2() : drs2();
     T src3 = std::is_same<float, T>::value ? frs3() : drs3();
@@ -893,7 +933,7 @@ class Simulator : public SimulatorBase {
 
   template <typename T, typename Func>
   inline T CanonicalizeFPUOp2(Func fn) {
-    DCHECK(std::is_floating_point<T>::value);
+    STATIC_ASSERT(std::is_floating_point<T>::value);
     T src1 = std::is_same<float, T>::value ? frs1() : drs1();
     T src2 = std::is_same<float, T>::value ? frs2() : drs2();
     auto alu_out = fn(src1, src2);
@@ -909,7 +949,7 @@ class Simulator : public SimulatorBase {
 
   template <typename T, typename Func>
   inline T CanonicalizeFPUOp1(Func fn) {
-    DCHECK(std::is_floating_point<T>::value);
+    STATIC_ASSERT(std::is_floating_point<T>::value);
     T src1 = std::is_same<float, T>::value ? frs1() : drs1();
     auto alu_out = fn(src1);
     // if any input or result is NaN, the result is quiet_NaN

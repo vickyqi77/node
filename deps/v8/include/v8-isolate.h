@@ -281,6 +281,12 @@ class V8_EXPORT Isolate {
      */
     int embedder_wrapper_type_index = -1;
     int embedder_wrapper_object_index = -1;
+
+    /**
+     * The following parameter is experimental and may change significantly.
+     * This is currently for internal testing.
+     */
+    Isolate* experimental_attach_to_shared_isolate = nullptr;
   };
 
   /**
@@ -586,6 +592,11 @@ class V8_EXPORT Isolate {
   static Isolate* TryGetCurrent();
 
   /**
+   * Return true if this isolate is currently active.
+   **/
+  bool IsCurrent() const;
+
+  /**
    * Clears the set of objects held strongly by the heap. This set of
    * objects are originally built when a WeakRef is created or
    * successfully dereferenced.
@@ -617,8 +628,11 @@ class V8_EXPORT Isolate {
    * This specifies the callback called by the upcoming dynamic
    * import() language feature to load modules.
    */
+  V8_DEPRECATE_SOON("Use HostImportModuleDynamicallyCallback")
   void SetHostImportModuleDynamicallyCallback(
       HostImportModuleDynamicallyWithImportAssertionsCallback callback);
+  void SetHostImportModuleDynamicallyCallback(
+      HostImportModuleDynamicallyCallback callback);
 
   /**
    * This specifies the callback called by the upcoming import.meta

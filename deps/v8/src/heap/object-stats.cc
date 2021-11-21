@@ -1019,17 +1019,17 @@ ObjectStats::VirtualInstanceType CodeKindToVirtualInstanceType(CodeKind kind) {
 void ObjectStatsCollectorImpl::RecordVirtualCodeDetails(Code code) {
   RecordSimpleVirtualObjectStats(HeapObject(), code,
                                  CodeKindToVirtualInstanceType(code.kind()));
-  RecordSimpleVirtualObjectStats(code, code.deoptimization_data(),
-                                 ObjectStats::DEOPTIMIZATION_DATA_TYPE);
   RecordSimpleVirtualObjectStats(code, code.relocation_info(),
                                  ObjectStats::RELOC_INFO_TYPE);
-  Object source_position_table = code.source_position_table();
-  if (source_position_table.IsHeapObject()) {
-    RecordSimpleVirtualObjectStats(code,
-                                   HeapObject::cast(source_position_table),
-                                   ObjectStats::SOURCE_POSITION_TABLE_TYPE);
-  }
   if (CodeKindIsOptimizedJSFunction(code.kind())) {
+    Object source_position_table = code.source_position_table();
+    if (source_position_table.IsHeapObject()) {
+      RecordSimpleVirtualObjectStats(code,
+                                     HeapObject::cast(source_position_table),
+                                     ObjectStats::SOURCE_POSITION_TABLE_TYPE);
+    }
+    RecordSimpleVirtualObjectStats(code, code.deoptimization_data(),
+                                   ObjectStats::DEOPTIMIZATION_DATA_TYPE);
     DeoptimizationData input_data =
         DeoptimizationData::cast(code.deoptimization_data());
     if (input_data.length() > 0) {
@@ -1039,9 +1039,10 @@ void ObjectStatsCollectorImpl::RecordVirtualCodeDetails(Code code) {
     }
   }
   int const mode_mask = RelocInfo::EmbeddedObjectModeMask();
+  PtrComprCageBase cage_base(heap_->isolate());
   for (RelocIterator it(code, mode_mask); !it.done(); it.next()) {
     DCHECK(RelocInfo::IsEmbeddedObjectMode(it.rinfo()->rmode()));
-    Object target = it.rinfo()->target_object();
+    Object target = it.rinfo()->target_object(cage_base);
     if (target.IsFixedArrayExact()) {
       RecordVirtualObjectsForConstantPoolOrEmbeddedObjects(
           code, HeapObject::cast(target), ObjectStats::EMBEDDED_OBJECT_TYPE);
@@ -1052,8 +1053,11 @@ void ObjectStatsCollectorImpl::RecordVirtualCodeDetails(Code code) {
 void ObjectStatsCollectorImpl::RecordVirtualContext(Context context) {
   if (context.IsNativeContext()) {
     RecordObjectStats(context, NATIVE_CONTEXT_TYPE, context.Size());
-    RecordSimpleVirtualObjectStats(context, context.retained_maps(),
-                                   ObjectStats::RETAINED_MAPS_TYPE);
+    if (context.retained_maps().IsWeakArrayList()) {
+      RecordSimpleVirtualObjectStats(
+          context, WeakArrayList::cast(context.retained_maps()),
+          ObjectStats::RETAINED_MAPS_TYPE);
+    }
 
   } else if (context.IsFunctionContext()) {
     RecordObjectStats(context, FUNCTION_CONTEXT_TYPE, context.Size());

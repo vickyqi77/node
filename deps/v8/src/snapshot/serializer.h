@@ -204,6 +204,10 @@ class Serializer : public SerializerDeserializer {
     Serializer* serializer_;
   };
 
+  // Compares obj with not_mapped_symbol root. When V8_EXTERNAL_CODE_SPACE is
+  // enabled it compares full pointers.
+  V8_INLINE bool IsNotMappedSymbol(HeapObject obj) const;
+
   void SerializeDeferredObjects();
   void SerializeObject(Handle<HeapObject> o);
   virtual void SerializeObjectImpl(Handle<HeapObject> o) = 0;
@@ -346,7 +350,7 @@ class Serializer : public SerializerDeserializer {
 
   // Disallow GC during serialization.
   // TODO(leszeks, v8:10815): Remove this constraint.
-  DISALLOW_GARBAGE_COLLECTION(no_gc)
+  DISALLOW_GARBAGE_COLLECTION(no_gc_)
 
   Isolate* isolate_;
   HotObjectsList hot_objects_;

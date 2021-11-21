@@ -34,6 +34,7 @@ namespace internal {
 Handle<String> String::SlowFlatten(Isolate* isolate, Handle<ConsString> cons,
                                    AllocationType allocation) {
   DCHECK_NE(cons->second().length(), 0);
+  DCHECK(!cons->InSharedHeap());
 
   // TurboFan can create cons strings with empty first parts.
   while (cons->first().length() == 0) {
@@ -43,14 +44,17 @@ Handle<String> String::SlowFlatten(Isolate* isolate, Handle<ConsString> cons,
     if (cons->second().IsConsString() && !cons->second().IsFlat()) {
       cons = handle(ConsString::cast(cons->second()), isolate);
     } else {
-      return String::Flatten(isolate, handle(cons->second(), isolate));
+      return String::Flatten(isolate, handle(cons->second(), isolate),
+                             allocation);
     }
   }
 
   DCHECK(AllowGarbageCollection::IsAllowed());
   int length = cons->length();
-  allocation =
-      ObjectInYoungGeneration(*cons) ? allocation : AllocationType::kOld;
+  if (allocation != AllocationType::kSharedOld) {
+    allocation =
+        ObjectInYoungGeneration(*cons) ? allocation : AllocationType::kOld;
+  }
   Handle<SeqString> result;
   if (cons->IsOneByteRepresentation()) {
     Handle<SeqOneByteString> flat =
@@ -73,6 +77,67 @@ Handle<String> String::SlowFlatten(Isolate* isolate, Handle<ConsString> cons,
   cons->set_second(ReadOnlyRoots(isolate).empty_string());
   DCHECK(result->IsFlat());
   return result;
+}
+
+Handle<String> String::SlowCopy(Isolate* isolate, Handle<SeqString> source,
+                                AllocationType allocation) {
+  int length = source->length();
+  Handle<String> copy;
+  if (source->IsOneByteRepresentation()) {
+    copy = isolate->factory()
+               ->NewRawOneByteString(length, allocation)
+               .ToHandleChecked();
+    DisallowGarbageCollection no_gc;
+    String::FlatContent content = source->GetFlatContent(no_gc);
+    CopyChars(SeqOneByteString::cast(*copy).GetChars(no_gc),
+              content.ToOneByteVector().begin(), length);
+    return copy;
+  } else {
+    copy = isolate->factory()
+               ->NewRawTwoByteString(length, allocation)
+               .ToHandleChecked();
+    DisallowGarbageCollection no_gc;
+    String::FlatContent content = source->GetFlatContent(no_gc);
+    CopyChars(SeqTwoByteString::cast(*copy).GetChars(no_gc),
+              content.ToUC16Vector().begin(), length);
+  }
+  return copy;
+}
+
+Handle<String> String::SlowShare(Isolate* isolate, Handle<String> source) {
+  DCHECK(FLAG_shared_string_table);
+  Handle<String> flat = Flatten(isolate, source, AllocationType::kSharedOld);
+
+  // Do not recursively call Share, so directly compute the sharing strategy for
+  // the flat string, which could already be a copy or an existing string from
+  // e.g. a shortcut ConsString.
+  MaybeHandle<Map> new_map;
+  switch (isolate->factory()->ComputeSharingStrategyForString(flat, &new_map)) {
+    case StringTransitionStrategy::kCopy:
+      break;
+    case StringTransitionStrategy::kInPlace:
+      // A relaxed write is sufficient here, because at this point the string
+      // has not yet escaped the current thread.
+      DCHECK(flat->InSharedHeap());
+      flat->set_map_no_write_barrier(*new_map.ToHandleChecked());
+      return flat;
+    case StringTransitionStrategy::kAlreadyTransitioned:
+      return flat;
+  }
+
+  int length = flat->length();
+  if (flat->IsOneByteRepresentation()) {
+    Handle<SeqOneByteString> copy =
+        isolate->factory()->NewRawSharedOneByteString(length).ToHandleChecked();
+    DisallowGarbageCollection no_gc;
+    WriteToFlat(*flat, copy->GetChars(no_gc), 0, length);
+    return copy;
+  }
+  Handle<SeqTwoByteString> copy =
+      isolate->factory()->NewRawSharedTwoByteString(length).ToHandleChecked();
+  DisallowGarbageCollection no_gc;
+  WriteToFlat(*flat, copy->GetChars(no_gc), 0, length);
+  return copy;
 }
 
 namespace {
@@ -119,6 +184,11 @@ void String::MakeThin(IsolateT* isolate, String internalized) {
   DisallowGarbageCollection no_gc;
   DCHECK_NE(*this, internalized);
   DCHECK(internalized.IsInternalizedString());
+  // TODO(v8:12007): Make this method threadsafe.
+  DCHECK(!IsShared());
+  DCHECK_IMPLIES(
+      InSharedWritableHeap(),
+      ThreadId::Current() == GetIsolateFromWritableObject(*this)->thread_id());
 
   if (this->IsExternalString()) {
     MigrateExternalString(isolate->AsIsolate(), *this, internalized);
@@ -535,63 +605,42 @@ Handle<Object> String::ToNumber(Isolate* isolate, Handle<String> subject) {
   return isolate->factory()->NewNumber(StringToDouble(isolate, subject, flags));
 }
 
-String::FlatContent String::GetFlatContent(
-    const DisallowGarbageCollection& no_gc) {
-#if DEBUG
-  // Check that this method is called only from the main thread.
-  {
-    Isolate* isolate;
-    // We don't have to check read only strings as those won't move.
-    DCHECK_IMPLIES(GetIsolateFromHeapObject(*this, &isolate),
-                   ThreadId::Current() == isolate->thread_id());
-  }
-#endif
+String::FlatContent String::SlowGetFlatContent(
+    const DisallowGarbageCollection& no_gc,
+    const SharedStringAccessGuardIfNeeded& access_guard) {
   USE(no_gc);
   PtrComprCageBase cage_base = GetPtrComprCageBase(*this);
-  int length = this->length();
-  StringShape shape(*this, cage_base);
   String string = *this;
+  StringShape shape(string, cage_base);
   int offset = 0;
-  if (shape.representation_tag() == kConsStringTag) {
+
+  // Extract cons- and sliced strings.
+  if (shape.IsCons()) {
     ConsString cons = ConsString::cast(string);
-    if (cons.second(cage_base).length() != 0) {
-      return FlatContent(no_gc);
-    }
+    if (!cons.IsFlat(cage_base)) return FlatContent(no_gc);
     string = cons.first(cage_base);
     shape = StringShape(string, cage_base);
-  } else if (shape.representation_tag() == kSlicedStringTag) {
+  } else if (shape.IsSliced()) {
     SlicedString slice = SlicedString::cast(string);
     offset = slice.offset();
     string = slice.parent(cage_base);
     shape = StringShape(string, cage_base);
-    DCHECK(shape.representation_tag() != kConsStringTag &&
-           shape.representation_tag() != kSlicedStringTag);
   }
-  if (shape.representation_tag() == kThinStringTag) {
+
+  DCHECK(!shape.IsCons());
+  DCHECK(!shape.IsSliced());
+
+  // Extract thin strings.
+  if (shape.IsThin()) {
     ThinString thin = ThinString::cast(string);
     string = thin.actual(cage_base);
     shape = StringShape(string, cage_base);
-    DCHECK(!shape.IsCons());
-    DCHECK(!shape.IsSliced());
   }
-  if (shape.encoding_tag() == kOneByteStringTag) {
-    const uint8_t* start;
-    if (shape.representation_tag() == kSeqStringTag) {
-      start = SeqOneByteString::cast(string).GetChars(no_gc);
-    } else {
-      start = ExternalOneByteString::cast(string).GetChars(cage_base);
-    }
-    return FlatContent(start + offset, length, no_gc);
-  } else {
-    DCHECK_EQ(shape.encoding_tag(), kTwoByteStringTag);
-    const base::uc16* start;
-    if (shape.representation_tag() == kSeqStringTag) {
-      start = SeqTwoByteString::cast(string).GetChars(no_gc);
-    } else {
-      start = ExternalTwoByteString::cast(string).GetChars(cage_base);
-    }
-    return FlatContent(start + offset, length, no_gc);
-  }
+
+  DCHECK(shape.IsDirect());
+  return TryGetFlatContentFromDirectString(cage_base, no_gc, string, offset,
+                                           length(), access_guard)
+      .value();
 }
 
 std::unique_ptr<char[]> String::ToCString(AllowNullsFlag allow_nulls,
@@ -886,17 +935,19 @@ bool String::SlowEquals(
 bool String::SlowEquals(Isolate* isolate, Handle<String> one,
                         Handle<String> two) {
   // Fast check: negative check with lengths.
-  int one_length = one->length();
+  const int one_length = one->length();
   if (one_length != two->length()) return false;
   if (one_length == 0) return true;
 
   // Fast check: if at least one ThinString is involved, dereference it/them
   // and restart.
   if (one->IsThinString() || two->IsThinString()) {
-    if (one->IsThinString())
+    if (one->IsThinString()) {
       one = handle(ThinString::cast(*one).actual(), isolate);
-    if (two->IsThinString())
+    }
+    if (two->IsThinString()) {
       two = handle(ThinString::cast(*two).actual(), isolate);
+    }
     return String::Equals(isolate, one, two);
   }
 
@@ -934,12 +985,17 @@ bool String::SlowEquals(Isolate* isolate, Handle<String> one,
   if (flat1.IsOneByte() && flat2.IsOneByte()) {
     return CompareCharsEqual(flat1.ToOneByteVector().begin(),
                              flat2.ToOneByteVector().begin(), one_length);
-  } else {
-    for (int i = 0; i < one_length; i++) {
-      if (flat1.Get(i) != flat2.Get(i)) return false;
-    }
-    return true;
+  } else if (flat1.IsTwoByte() && flat2.IsTwoByte()) {
+    return CompareCharsEqual(flat1.ToUC16Vector().begin(),
+                             flat2.ToUC16Vector().begin(), one_length);
+  } else if (flat1.IsOneByte() && flat2.IsTwoByte()) {
+    return CompareCharsEqual(flat1.ToOneByteVector().begin(),
+                             flat2.ToUC16Vector().begin(), one_length);
+  } else if (flat1.IsTwoByte() && flat2.IsOneByte()) {
+    return CompareCharsEqual(flat1.ToUC16Vector().begin(),
+                             flat2.ToOneByteVector().begin(), one_length);
   }
+  UNREACHABLE();
 }
 
 // static
@@ -1399,7 +1455,12 @@ uint32_t String::ComputeAndSetHash(
     const SharedStringAccessGuardIfNeeded& access_guard) {
   DisallowGarbageCollection no_gc;
   // Should only be called if hash code has not yet been computed.
-  DCHECK(!HasHashCode());
+  //
+  // If in-place internalizable strings are shared, there may be calls to
+  // ComputeAndSetHash in parallel. Since only flat strings are in-place
+  // internalizable and their contents do not change, the result hash is the
+  // same. The raw hash field is stored with relaxed ordering.
+  DCHECK_IMPLIES(!FLAG_shared_string_table, !HasHashCode());
 
   // Store the hash code in the object.
   uint64_t seed = HashSeed(GetReadOnlyRoots());

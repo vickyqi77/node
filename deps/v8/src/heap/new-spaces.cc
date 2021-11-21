@@ -429,7 +429,7 @@ void NewSpace::ResetParkedAllocationBuffers() {
 void NewSpace::Flip() { SemiSpace::Swap(&from_space_, &to_space_); }
 
 void NewSpace::Grow() {
-  DCHECK(heap()->safepoint()->IsActive());
+  heap()->safepoint()->AssertActive();
   // Double the semispace size but only up to maximum capacity.
   DCHECK(TotalCapacity() < MaximumCapacity());
   size_t new_capacity = std::min(
@@ -611,25 +611,15 @@ std::unique_ptr<ObjectIterator> NewSpace::GetObjectIterator(Heap* heap) {
 AllocationResult NewSpace::AllocateRawSlow(int size_in_bytes,
                                            AllocationAlignment alignment,
                                            AllocationOrigin origin) {
-#ifdef V8_HOST_ARCH_32_BIT
-  return alignment != kWordAligned
+  return USE_ALLOCATION_ALIGNMENT_BOOL && alignment != kTaggedAligned
              ? AllocateRawAligned(size_in_bytes, alignment, origin)
              : AllocateRawUnaligned(size_in_bytes, origin);
-#else
-#ifdef V8_COMPRESS_POINTERS
-  // TODO(ishell, v8:8875): Consider using aligned allocations once the
-  // allocation alignment inconsistency is fixed. For now we keep using
-  // unaligned access since both x64 and arm64 architectures (where pointer
-  // compression is supported) allow unaligned access to doubles and full words.
-#endif  // V8_COMPRESS_POINTERS
-  return AllocateRawUnaligned(size_in_bytes, origin);
-#endif
 }
 
 AllocationResult NewSpace::AllocateRawUnaligned(int size_in_bytes,
                                                 AllocationOrigin origin) {
   DCHECK(!FLAG_enable_third_party_heap);
-  if (!EnsureAllocation(size_in_bytes, kWordAligned)) {
+  if (!EnsureAllocation(size_in_bytes, kTaggedAligned)) {
     return AllocationResult::Retry(NEW_SPACE);
   }
 
@@ -664,6 +654,21 @@ AllocationResult NewSpace::AllocateRawAligned(int size_in_bytes,
                             aligned_size_in_bytes, aligned_size_in_bytes);
 
   return result;
+}
+
+void NewSpace::MakeLinearAllocationAreaIterable() {
+  Address to_top = top();
+  Page* page = Page::FromAddress(to_top - kTaggedSize);
+  if (page->Contains(to_top)) {
+    int remaining_in_page = static_cast<int>(page->area_end() - to_top);
+    heap_->CreateFillerObjectAt(to_top, remaining_in_page,
+                                ClearRecordedSlots::kNo);
+  }
+}
+
+void NewSpace::FreeLinearAllocationArea() {
+  MakeLinearAllocationAreaIterable();
+  UpdateInlineAllocationLimit(0);
 }
 
 void NewSpace::VerifyTop() {
@@ -726,8 +731,9 @@ void NewSpace::Verify(Isolate* isolate) {
 
       if (object.IsExternalString()) {
         ExternalString external_string = ExternalString::cast(object);
-        size_t size = external_string.ExternalPayloadSize();
-        external_space_bytes[ExternalBackingStoreType::kExternalString] += size;
+        size_t string_size = external_string.ExternalPayloadSize();
+        external_space_bytes[ExternalBackingStoreType::kExternalString] +=
+            string_size;
       }
 
       current += size;

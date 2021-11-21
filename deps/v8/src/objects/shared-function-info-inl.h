@@ -94,19 +94,6 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(UncompiledDataWithoutPreparseData)
 TQ_OBJECT_CONSTRUCTORS_IMPL(UncompiledDataWithPreparseData)
 
 TQ_OBJECT_CONSTRUCTORS_IMPL(InterpreterData)
-
-ACCESSORS(InterpreterData, raw_interpreter_trampoline, CodeT,
-          kInterpreterTrampolineOffset)
-
-DEF_GETTER(InterpreterData, interpreter_trampoline, Code) {
-  return FromCodeT(raw_interpreter_trampoline(cage_base));
-}
-
-void InterpreterData::set_interpreter_trampoline(Code code,
-                                                 WriteBarrierMode mode) {
-  set_raw_interpreter_trampoline(ToCodeT(code), mode);
-}
-
 TQ_OBJECT_CONSTRUCTORS_IMPL(SharedFunctionInfo)
 NEVER_READ_ONLY_SPACE_IMPL(SharedFunctionInfo)
 DEFINE_DEOPT_ELEMENT_ACCESSORS(SharedFunctionInfo, Object)
@@ -211,7 +198,7 @@ AbstractCode SharedFunctionInfo::abstract_code(IsolateT* isolate) {
   if (HasBytecodeArray()) {
     return AbstractCode::cast(GetBytecodeArray(isolate));
   } else {
-    return AbstractCode::cast(GetCode());
+    return AbstractCode::cast(FromCodeT(GetCode()));
   }
 }
 
@@ -310,10 +297,10 @@ BIT_FIELD_ACCESSORS(SharedFunctionInfo, relaxed_flags,
                     SharedFunctionInfo::PrivateNameLookupSkipsOuterClassBit)
 
 bool SharedFunctionInfo::optimization_disabled() const {
-  return disable_optimization_reason() != BailoutReason::kNoReason;
+  return disabled_optimization_reason() != BailoutReason::kNoReason;
 }
 
-BailoutReason SharedFunctionInfo::disable_optimization_reason() const {
+BailoutReason SharedFunctionInfo::disabled_optimization_reason() const {
   return DisabledOptimizationReasonBits::decode(flags(kRelaxedLoad));
 }
 
@@ -414,16 +401,16 @@ bool SharedFunctionInfo::IsDontAdaptArguments() const {
 
 bool SharedFunctionInfo::IsInterpreted() const { return HasBytecodeArray(); }
 
-ScopeInfo SharedFunctionInfo::scope_info(AcquireLoadTag tag) const {
-  Object maybe_scope_info = name_or_scope_info(tag);
-  if (maybe_scope_info.IsScopeInfo()) {
+DEF_ACQUIRE_GETTER(SharedFunctionInfo, scope_info, ScopeInfo) {
+  Object maybe_scope_info = name_or_scope_info(cage_base, kAcquireLoad);
+  if (maybe_scope_info.IsScopeInfo(cage_base)) {
     return ScopeInfo::cast(maybe_scope_info);
   }
   return GetReadOnlyRoots().empty_scope_info();
 }
 
-ScopeInfo SharedFunctionInfo::scope_info() const {
-  return scope_info(kAcquireLoad);
+DEF_GETTER(SharedFunctionInfo, scope_info, ScopeInfo) {
+  return scope_info(cage_base, kAcquireLoad);
 }
 
 void SharedFunctionInfo::SetScopeInfo(ScopeInfo scope_info,
@@ -581,7 +568,7 @@ BytecodeArray SharedFunctionInfo::GetBytecodeArray(IsolateT* isolate) const {
 BytecodeArray SharedFunctionInfo::GetActiveBytecodeArray() const {
   Object data = function_data(kAcquireLoad);
   if (data.IsCodeT()) {
-    Code baseline_code = FromCodeT(CodeT::cast(data));
+    CodeT baseline_code = CodeT::cast(data);
     data = baseline_code.bytecode_or_interpreter_data();
   }
   if (data.IsBytecodeArray()) {
@@ -626,7 +613,7 @@ bool SharedFunctionInfo::ShouldFlushCode(
   // called by the concurrent marker.
   Object data = function_data(kAcquireLoad);
   if (data.IsCodeT()) {
-    Code baseline_code = FromCodeT(CodeT::cast(data));
+    CodeT baseline_code = CodeT::cast(data);
     DCHECK_EQ(baseline_code.kind(), CodeKind::BASELINE);
     // If baseline code flushing isn't enabled and we have baseline data on SFI
     // we cannot flush baseline / bytecode.
@@ -646,7 +633,7 @@ bool SharedFunctionInfo::ShouldFlushCode(
   return bytecode.IsOld();
 }
 
-Code SharedFunctionInfo::InterpreterTrampoline() const {
+CodeT SharedFunctionInfo::InterpreterTrampoline() const {
   DCHECK(HasInterpreterData());
   return interpreter_data().interpreter_trampoline();
 }
@@ -654,7 +641,7 @@ Code SharedFunctionInfo::InterpreterTrampoline() const {
 bool SharedFunctionInfo::HasInterpreterData() const {
   Object data = function_data(kAcquireLoad);
   if (data.IsCodeT()) {
-    Code baseline_code = FromCodeT(CodeT::cast(data));
+    CodeT baseline_code = CodeT::cast(data);
     DCHECK_EQ(baseline_code.kind(), CodeKind::BASELINE);
     data = baseline_code.bytecode_or_interpreter_data();
   }
@@ -665,7 +652,7 @@ InterpreterData SharedFunctionInfo::interpreter_data() const {
   DCHECK(HasInterpreterData());
   Object data = function_data(kAcquireLoad);
   if (data.IsCodeT()) {
-    Code baseline_code = FromCodeT(CodeT::cast(data));
+    CodeT baseline_code = CodeT::cast(data);
     DCHECK_EQ(baseline_code.kind(), CodeKind::BASELINE);
     data = baseline_code.bytecode_or_interpreter_data();
   }
@@ -682,21 +669,21 @@ void SharedFunctionInfo::set_interpreter_data(
 bool SharedFunctionInfo::HasBaselineCode() const {
   Object data = function_data(kAcquireLoad);
   if (data.IsCodeT()) {
-    DCHECK_EQ(FromCodeT(CodeT::cast(data)).kind(), CodeKind::BASELINE);
+    DCHECK_EQ(CodeT::cast(data).kind(), CodeKind::BASELINE);
     return true;
   }
   return false;
 }
 
-Code SharedFunctionInfo::baseline_code(AcquireLoadTag) const {
+CodeT SharedFunctionInfo::baseline_code(AcquireLoadTag) const {
   DCHECK(HasBaselineCode());
-  return FromCodeT(CodeT::cast(function_data(kAcquireLoad)));
+  return CodeT::cast(function_data(kAcquireLoad));
 }
 
-void SharedFunctionInfo::set_baseline_code(Code baseline_code,
+void SharedFunctionInfo::set_baseline_code(CodeT baseline_code,
                                            ReleaseStoreTag) {
   DCHECK_EQ(baseline_code.kind(), CodeKind::BASELINE);
-  set_function_data(ToCodeT(baseline_code), kReleaseStore);
+  set_function_data(baseline_code, kReleaseStore);
 }
 
 void SharedFunctionInfo::FlushBaselineCode() {
@@ -844,9 +831,9 @@ void UncompiledData::InitAfterBytecodeFlush(
   set_end_position(end_position);
 }
 
-HeapObject SharedFunctionInfo::script() const {
-  HeapObject maybe_script = script_or_debug_info(kAcquireLoad);
-  if (maybe_script.IsDebugInfo()) {
+DEF_GETTER(SharedFunctionInfo, script, HeapObject) {
+  HeapObject maybe_script = script_or_debug_info(cage_base, kAcquireLoad);
+  if (maybe_script.IsDebugInfo(cage_base)) {
     return DebugInfo::cast(maybe_script).script();
   }
   return maybe_script;

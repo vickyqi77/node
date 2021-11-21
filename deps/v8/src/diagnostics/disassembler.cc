@@ -243,11 +243,7 @@ static void PrintRelocInfo(std::ostringstream& out, Isolate* isolate,
   } else if (RelocInfo::IsEmbeddedObjectMode(rmode)) {
     HeapStringAllocator allocator;
     StringStream accumulator(&allocator);
-    if (relocinfo->host().is_null()) {
-      relocinfo->target_object_no_host(isolate).ShortPrint(&accumulator);
-    } else {
-      relocinfo->target_object().ShortPrint(&accumulator);
-    }
+    relocinfo->target_object(isolate).ShortPrint(&accumulator);
     std::unique_ptr<char[]> obj_name = accumulator.ToCString();
     const bool is_compressed = RelocInfo::IsCompressedEmbeddedObject(rmode);
     out << "    ;; " << (is_compressed ? "(compressed) " : "")
@@ -425,8 +421,8 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
     // bytes, a constant could accidentally match with the bit-pattern checked
     // by IsInConstantPool() below.
     if (pcs.empty() && !code.is_null() && !decoding_constant_pool) {
-      RelocInfo dummy_rinfo(reinterpret_cast<Address>(prev_pc), RelocInfo::NONE,
-                            0, Code());
+      RelocInfo dummy_rinfo(reinterpret_cast<Address>(prev_pc),
+                            RelocInfo::NO_INFO, 0, Code());
       if (dummy_rinfo.IsInConstantPool()) {
         Address constant_pool_entry_address =
             dummy_rinfo.constant_pool_entry_address();

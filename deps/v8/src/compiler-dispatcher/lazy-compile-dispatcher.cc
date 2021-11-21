@@ -4,7 +4,11 @@
 
 #include "src/compiler-dispatcher/lazy-compile-dispatcher.h"
 
+#include <atomic>
+
+#include "include/v8-platform.h"
 #include "src/ast/ast.h"
+#include "src/base/platform/mutex.h"
 #include "src/base/platform/time.h"
 #include "src/codegen/compiler.h"
 #include "src/flags/flags.h"
@@ -21,8 +25,26 @@
 namespace v8 {
 namespace internal {
 
-LazyCompileDispatcher::Job::Job(BackgroundCompileTask* task_arg)
-    : task(task_arg), has_run(false), aborted(false) {}
+class LazyCompileDispatcher::JobTask : public v8::JobTask {
+ public:
+  explicit JobTask(LazyCompileDispatcher* lazy_compile_dispatcher)
+      : lazy_compile_dispatcher_(lazy_compile_dispatcher) {}
+
+  void Run(JobDelegate* delegate) final {
+    lazy_compile_dispatcher_->DoBackgroundWork(delegate);
+  }
+
+  size_t GetMaxConcurrency(size_t worker_count) const final {
+    return lazy_compile_dispatcher_->num_jobs_for_background_.load(
+        std::memory_order_relaxed);
+  }
+
+ private:
+  LazyCompileDispatcher* lazy_compile_dispatcher_;
+};
+
+LazyCompileDispatcher::Job::Job(std::unique_ptr<BackgroundCompileTask> task)
+    : task(std::move(task)), state(Job::State::kPending) {}
 
 LazyCompileDispatcher::Job::~Job() = default;
 
@@ -39,107 +61,76 @@ LazyCompileDispatcher::LazyCompileDispatcher(Isolate* isolate,
       platform_(platform),
       max_stack_size_(max_stack_size),
       trace_compiler_dispatcher_(FLAG_trace_compiler_dispatcher),
-      task_manager_(new CancelableTaskManager()),
-      next_job_id_(0),
-      shared_to_unoptimized_job_id_(isolate->heap()),
+      idle_task_manager_(new CancelableTaskManager()),
+      shared_to_unoptimized_job_(isolate->heap()),
       idle_task_scheduled_(false),
-      num_worker_tasks_(0),
+      num_jobs_for_background_(0),
       main_thread_blocking_on_job_(nullptr),
       block_for_testing_(false),
       semaphore_for_testing_(0) {
-  if (trace_compiler_dispatcher_ && !IsEnabled()) {
-    PrintF("LazyCompileDispatcher: dispatcher is disabled\n");
-  }
+  job_handle_ = platform_->PostJob(TaskPriority::kUserVisible,
+                                   std::make_unique<JobTask>(this));
 }
 
 LazyCompileDispatcher::~LazyCompileDispatcher() {
   // AbortAll must be called before LazyCompileDispatcher is destroyed.
-  CHECK(task_manager_->canceled());
+  CHECK(!job_handle_->IsValid());
 }
 
-base::Optional<LazyCompileDispatcher::JobId> LazyCompileDispatcher::Enqueue(
-    const ParseInfo* outer_parse_info, const AstRawString* function_name,
-    const FunctionLiteral* function_literal) {
+void LazyCompileDispatcher::Enqueue(
+    LocalIsolate* isolate, Handle<SharedFunctionInfo> shared_info,
+    std::unique_ptr<Utf16CharacterStream> character_stream,
+    ProducedPreparseData* preparse_data) {
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
                "V8.LazyCompilerDispatcherEnqueue");
-  RCS_SCOPE(isolate_, RuntimeCallCounterId::kCompileEnqueueOnDispatcher);
+  RCS_SCOPE(isolate, RuntimeCallCounterId::kCompileEnqueueOnDispatcher);
 
-  if (!IsEnabled()) return base::nullopt;
-
-  std::unique_ptr<Job> job = std::make_unique<Job>(new BackgroundCompileTask(
-      outer_parse_info, function_name, function_literal,
-      worker_thread_runtime_call_stats_, background_compile_timer_,
-      static_cast<int>(max_stack_size_)));
-  JobMap::const_iterator it = InsertJob(std::move(job));
-  JobId id = it->first;
-  if (trace_compiler_dispatcher_) {
-    PrintF(
-        "LazyCompileDispatcher: enqueued job %zu for function literal id %d\n",
-        id, function_literal->function_literal_id());
-  }
+  std::unique_ptr<Job> job =
+      std::make_unique<Job>(std::make_unique<BackgroundCompileTask>(
+          isolate_, shared_info, std::move(character_stream), preparse_data,
+          worker_thread_runtime_call_stats_, background_compile_timer_,
+          static_cast<int>(max_stack_size_)));
 
   // Post a a background worker task to perform the compilation on the worker
   // thread.
   {
     base::MutexGuard lock(&mutex_);
-    pending_background_jobs_.insert(it->second.get());
-  }
-  ScheduleMoreWorkerTasksIfNeeded();
-  return base::make_optional(id);
-}
+    if (trace_compiler_dispatcher_) {
+      PrintF("LazyCompileDispatcher: enqueued job for  ");
+      shared_info->ShortPrint();
+      PrintF("\n");
+    }
 
-bool LazyCompileDispatcher::IsEnabled() const {
-  return FLAG_lazy_compile_dispatcher;
+    pending_background_jobs_.insert(job.get());
+    // Transfer ownership of the job to the IdentityMap
+    shared_to_unoptimized_job_.Insert(shared_info, job.release());
+
+    num_jobs_for_background_ += 1;
+    VerifyBackgroundTaskCount(lock);
+  }
+  job_handle_->NotifyConcurrencyIncrease();
 }
 
 bool LazyCompileDispatcher::IsEnqueued(
     Handle<SharedFunctionInfo> function) const {
-  if (jobs_.empty()) return false;
-  return GetJobFor(function) != jobs_.end();
+  base::MutexGuard lock(&mutex_);
+  return shared_to_unoptimized_job_.Find(function) != nullptr;
 }
 
-bool LazyCompileDispatcher::IsEnqueued(JobId job_id) const {
-  return jobs_.find(job_id) != jobs_.end();
-}
-
-void LazyCompileDispatcher::RegisterSharedFunctionInfo(
-    JobId job_id, SharedFunctionInfo function) {
-  DCHECK_NE(jobs_.find(job_id), jobs_.end());
-
-  if (trace_compiler_dispatcher_) {
-    PrintF("LazyCompileDispatcher: registering ");
-    function.ShortPrint();
-    PrintF(" with job id %zu\n", job_id);
-  }
-
-  // Make a global handle to the function.
-  Handle<SharedFunctionInfo> function_handle = Handle<SharedFunctionInfo>::cast(
-      isolate_->global_handles()->Create(function));
-
-  // Register mapping.
-  auto job_it = jobs_.find(job_id);
-  DCHECK_NE(job_it, jobs_.end());
-  Job* job = job_it->second.get();
-  shared_to_unoptimized_job_id_.Insert(function_handle, job_id);
-
-  {
-    base::MutexGuard lock(&mutex_);
-    job->function = function_handle;
-    if (job->IsReadyToFinalize(lock)) {
-      // Schedule an idle task to finalize job if it is ready.
-      ScheduleIdleTaskFromAnyThread(lock);
-    }
-  }
-}
-
-void LazyCompileDispatcher::WaitForJobIfRunningOnBackground(Job* job) {
+void LazyCompileDispatcher::WaitForJobIfRunningOnBackground(
+    Job* job, const base::MutexGuard& lock) {
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
                "V8.LazyCompilerDispatcherWaitForBackgroundJob");
   RCS_SCOPE(isolate_, RuntimeCallCounterId::kCompileWaitForDispatcher);
 
-  base::MutexGuard lock(&mutex_);
-  if (running_background_jobs_.find(job) == running_background_jobs_.end()) {
-    pending_background_jobs_.erase(job);
+  if (!job->is_running_on_background()) {
+    num_jobs_for_background_ -= pending_background_jobs_.erase(job);
+    if (job->state == Job::State::kPending) {
+      job->state = Job::State::kPendingToRunOnForeground;
+    } else {
+      DCHECK_EQ(job->state, Job::State::kReadyToFinalize);
+    }
+    VerifyBackgroundTaskCount(lock);
     return;
   }
   DCHECK_NULL(main_thread_blocking_on_job_);
@@ -148,7 +139,6 @@ void LazyCompileDispatcher::WaitForJobIfRunningOnBackground(Job* job) {
     main_thread_blocking_signal_.Wait(&mutex_);
   }
   DCHECK(pending_background_jobs_.find(job) == pending_background_jobs_.end());
-  DCHECK(running_background_jobs_.find(job) == running_background_jobs_.end());
 }
 
 bool LazyCompileDispatcher::FinishNow(Handle<SharedFunctionInfo> function) {
@@ -161,72 +151,78 @@ bool LazyCompileDispatcher::FinishNow(Handle<SharedFunctionInfo> function) {
     PrintF(" now\n");
   }
 
-  JobMap::const_iterator it = GetJobFor(function);
-  CHECK(it != jobs_.end());
-  Job* job = it->second.get();
-  WaitForJobIfRunningOnBackground(job);
+  Job* job;
 
-  if (!job->has_run) {
-    job->task->Run();
-    job->has_run = true;
+  {
+    base::MutexGuard lock(&mutex_);
+    job = GetJobFor(function, lock);
+    WaitForJobIfRunningOnBackground(job, lock);
+    shared_to_unoptimized_job_.Delete(function, &job);
   }
 
-  DCHECK(job->IsReadyToFinalize(&mutex_));
-  DCHECK(!job->aborted);
+  if (job->state == Job::State::kPendingToRunOnForeground) {
+    job->task->Run();
+    job->state = Job::State::kReadyToFinalize;
+  }
+
+  DCHECK_EQ(job->state, Job::State::kReadyToFinalize);
   bool success = Compiler::FinalizeBackgroundCompileTask(
-      job->task.get(), function, isolate_, Compiler::KEEP_EXCEPTION);
+      job->task.get(), isolate_, Compiler::KEEP_EXCEPTION);
 
   DCHECK_NE(success, isolate_->has_pending_exception());
-  RemoveJob(it);
+  delete job;
   return success;
 }
 
-void LazyCompileDispatcher::AbortJob(JobId job_id) {
+void LazyCompileDispatcher::AbortJob(Handle<SharedFunctionInfo> shared_info) {
   if (trace_compiler_dispatcher_) {
-    PrintF("LazyCompileDispatcher: aborted job %zu\n", job_id);
+    PrintF("LazyCompileDispatcher: aborting job for ");
+    shared_info->ShortPrint();
+    PrintF("\n");
   }
-  JobMap::const_iterator job_it = jobs_.find(job_id);
-  Job* job = job_it->second.get();
-
   base::LockGuard<base::Mutex> lock(&mutex_);
-  pending_background_jobs_.erase(job);
-  if (running_background_jobs_.find(job) == running_background_jobs_.end()) {
-    RemoveJob(job_it);
-  } else {
+
+  Job* job = GetJobFor(shared_info, lock);
+  num_jobs_for_background_ -= pending_background_jobs_.erase(job);
+  if (job->is_running_on_background()) {
     // Job is currently running on the background thread, wait until it's done
     // and remove job then.
-    job->aborted = true;
+    job->state = Job::State::kAbortRequested;
+  } else {
+    shared_to_unoptimized_job_.Delete(shared_info, &job);
+    delete job;
   }
+  VerifyBackgroundTaskCount(lock);
 }
 
 void LazyCompileDispatcher::AbortAll() {
-  task_manager_->TryAbortAll();
+  idle_task_manager_->TryAbortAll();
+  job_handle_->Cancel();
 
-  for (auto& it : jobs_) {
-    WaitForJobIfRunningOnBackground(it.second.get());
-    if (trace_compiler_dispatcher_) {
-      PrintF("LazyCompileDispatcher: aborted job %zu\n", it.first);
-    }
-  }
-  jobs_.clear();
-  shared_to_unoptimized_job_id_.Clear();
   {
     base::MutexGuard lock(&mutex_);
-    DCHECK(pending_background_jobs_.empty());
-    DCHECK(running_background_jobs_.empty());
+    pending_background_jobs_.clear();
   }
 
-  task_manager_->CancelAndWait();
+  idle_task_manager_->CancelAndWait();
+
+  {
+    base::MutexGuard lock(&mutex_);
+    SharedToJobMap::IteratableScope iteratable_scope(
+        &shared_to_unoptimized_job_);
+    for (Job** job_entry : iteratable_scope) {
+      Job* job = *job_entry;
+      DCHECK_NE(job->state, Job::State::kRunning);
+      DCHECK_NE(job->state, Job::State::kAbortRequested);
+      delete job;
+    }
+  }
+  shared_to_unoptimized_job_.Clear();
 }
 
-LazyCompileDispatcher::JobMap::const_iterator LazyCompileDispatcher::GetJobFor(
-    Handle<SharedFunctionInfo> shared) const {
-  JobId* job_id_ptr = shared_to_unoptimized_job_id_.Find(shared);
-  JobMap::const_iterator job = jobs_.end();
-  if (job_id_ptr) {
-    job = jobs_.find(*job_id_ptr);
-  }
-  return job;
+LazyCompileDispatcher::Job* LazyCompileDispatcher::GetJobFor(
+    Handle<SharedFunctionInfo> shared, const base::MutexGuard&) const {
+  return *shared_to_unoptimized_job_.Find(shared);
 }
 
 void LazyCompileDispatcher::ScheduleIdleTaskFromAnyThread(
@@ -235,41 +231,28 @@ void LazyCompileDispatcher::ScheduleIdleTaskFromAnyThread(
   if (idle_task_scheduled_) return;
 
   idle_task_scheduled_ = true;
+  // TODO(leszeks): Using a full task manager for a single cancellable task is
+  // overkill, we could probably do the cancelling ourselves.
   taskrunner_->PostIdleTask(MakeCancelableIdleTask(
-      task_manager_.get(),
+      idle_task_manager_.get(),
       [this](double deadline_in_seconds) { DoIdleWork(deadline_in_seconds); }));
 }
 
-void LazyCompileDispatcher::ScheduleMoreWorkerTasksIfNeeded() {
+void LazyCompileDispatcher::DoBackgroundWork(JobDelegate* delegate) {
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
-               "V8.LazyCompilerDispatcherScheduleMoreWorkerTasksIfNeeded");
-  {
-    base::MutexGuard lock(&mutex_);
-    if (pending_background_jobs_.empty()) return;
-    if (platform_->NumberOfWorkerThreads() <= num_worker_tasks_) {
-      return;
-    }
-    ++num_worker_tasks_;
-  }
-  platform_->CallOnWorkerThread(
-      MakeCancelableTask(task_manager_.get(), [this] { DoBackgroundWork(); }));
-}
-
-void LazyCompileDispatcher::DoBackgroundWork() {
-  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
-               "V8.LazyCompilerDispatcherDoBackgroundWork");
-  for (;;) {
+               "V8.LazyCompileDispatcherDoBackgroundWork");
+  while (!delegate->ShouldYield()) {
     Job* job = nullptr;
     {
       base::MutexGuard lock(&mutex_);
-      if (!pending_background_jobs_.empty()) {
-        auto it = pending_background_jobs_.begin();
-        job = *it;
-        pending_background_jobs_.erase(it);
-        running_background_jobs_.insert(job);
-      }
+      if (pending_background_jobs_.empty()) break;
+      auto it = pending_background_jobs_.begin();
+      job = *it;
+      pending_background_jobs_.erase(it);
+      DCHECK_EQ(job->state, Job::State::kPending);
+      job->state = Job::State::kRunning;
+      VerifyBackgroundTaskCount(lock);
     }
-    if (job == nullptr) break;
 
     if (V8_UNLIKELY(block_for_testing_.Value())) {
       block_for_testing_.SetValue(false);
@@ -284,26 +267,26 @@ void LazyCompileDispatcher::DoBackgroundWork() {
 
     {
       base::MutexGuard lock(&mutex_);
-      running_background_jobs_.erase(job);
-
-      job->has_run = true;
-      if (job->IsReadyToFinalize(lock)) {
+      if (job->state == Job::State::kRunning) {
+        job->state = Job::State::kReadyToFinalize;
         // Schedule an idle task to finalize the compilation on the main thread
         // if the job has a shared function info registered.
-        ScheduleIdleTaskFromAnyThread(lock);
+      } else {
+        DCHECK_EQ(job->state, Job::State::kAbortRequested);
+        job->state = Job::State::kAborted;
       }
+      num_jobs_for_background_--;
+      VerifyBackgroundTaskCount(lock);
 
       if (main_thread_blocking_on_job_ == job) {
         main_thread_blocking_on_job_ = nullptr;
         main_thread_blocking_signal_.NotifyOne();
+      } else {
+        ScheduleIdleTaskFromAnyThread(lock);
       }
     }
   }
 
-  {
-    base::MutexGuard lock(&mutex_);
-    --num_worker_tasks_;
-  }
   // Don't touch |this| anymore after this point, as it might have been
   // deleted.
 }
@@ -323,30 +306,41 @@ void LazyCompileDispatcher::DoIdleWork(double deadline_in_seconds) {
   }
   while (deadline_in_seconds > platform_->MonotonicallyIncreasingTime()) {
     // Find a job which is pending finalization and has a shared function info
-    LazyCompileDispatcher::JobMap::const_iterator it;
+
+    SharedFunctionInfo function;
+    Job* job;
     {
       base::MutexGuard lock(&mutex_);
-      for (it = jobs_.cbegin(); it != jobs_.cend(); ++it) {
-        if (it->second->IsReadyToFinalize(lock)) break;
+      SharedToJobMap::IteratableScope iteratable_scope(
+          &shared_to_unoptimized_job_);
+
+      auto it = iteratable_scope.begin();
+      auto end = iteratable_scope.end();
+      for (; it != end; ++it) {
+        job = *it.entry();
+        if (job->state == Job::State::kReadyToFinalize ||
+            job->state == Job::State::kAborted) {
+          function = SharedFunctionInfo::cast(it.key());
+          break;
+        }
       }
       // Since we hold the lock here, we can be sure no jobs have become ready
       // for finalization while we looped through the list.
-      if (it == jobs_.cend()) return;
+      if (it == end) return;
 
-      DCHECK(it->second->IsReadyToFinalize(lock));
-      DCHECK_EQ(running_background_jobs_.find(it->second.get()),
-                running_background_jobs_.end());
-      DCHECK_EQ(pending_background_jobs_.find(it->second.get()),
+      DCHECK_EQ(pending_background_jobs_.find(job),
                 pending_background_jobs_.end());
     }
+    shared_to_unoptimized_job_.Delete(function, &job);
 
-    Job* job = it->second.get();
-    if (!job->aborted) {
-      Compiler::FinalizeBackgroundCompileTask(
-          job->task.get(), job->function.ToHandleChecked(), isolate_,
-          Compiler::CLEAR_EXCEPTION);
+    if (job->state == Job::State::kReadyToFinalize) {
+      HandleScope scope(isolate_);
+      Compiler::FinalizeBackgroundCompileTask(job->task.get(), isolate_,
+                                              Compiler::CLEAR_EXCEPTION);
+    } else {
+      DCHECK_EQ(job->state, Job::State::kAborted);
     }
-    RemoveJob(it);
+    delete job;
   }
 
   // We didn't return above so there still might be jobs to finalize.
@@ -356,32 +350,28 @@ void LazyCompileDispatcher::DoIdleWork(double deadline_in_seconds) {
   }
 }
 
-LazyCompileDispatcher::JobMap::const_iterator LazyCompileDispatcher::InsertJob(
-    std::unique_ptr<Job> job) {
-  bool added;
-  JobMap::const_iterator it;
-  std::tie(it, added) =
-      jobs_.insert(std::make_pair(next_job_id_++, std::move(job)));
-  DCHECK(added);
-  return it;
-}
+#ifdef DEBUG
+void LazyCompileDispatcher::VerifyBackgroundTaskCount(const base::MutexGuard&) {
+  int running_jobs = 0;
+  int pending_jobs = 0;
 
-LazyCompileDispatcher::JobMap::const_iterator LazyCompileDispatcher::RemoveJob(
-    LazyCompileDispatcher::JobMap::const_iterator it) {
-  Job* job = it->second.get();
-
-  DCHECK_EQ(running_background_jobs_.find(job), running_background_jobs_.end());
-  DCHECK_EQ(pending_background_jobs_.find(job), pending_background_jobs_.end());
-
-  // Delete SFI associated with job if its been registered.
-  Handle<SharedFunctionInfo> function;
-  if (job->function.ToHandle(&function)) {
-    GlobalHandles::Destroy(function.location());
+  SharedToJobMap::IteratableScope iteratable_scope(&shared_to_unoptimized_job_);
+  auto it = iteratable_scope.begin();
+  auto end = iteratable_scope.end();
+  for (; it != end; ++it) {
+    Job* job = *it.entry();
+    if (job->state == Job::State::kRunning ||
+        job->state == Job::State::kAbortRequested) {
+      running_jobs++;
+    } else if (job->state == Job::State::kPending) {
+      pending_jobs++;
+    }
   }
 
-  // Delete job.
-  return jobs_.erase(it);
+  CHECK_EQ(pending_jobs, pending_background_jobs_.size());
+  CHECK_EQ(num_jobs_for_background_.load(), running_jobs + pending_jobs);
 }
+#endif
 
 }  // namespace internal
 }  // namespace v8

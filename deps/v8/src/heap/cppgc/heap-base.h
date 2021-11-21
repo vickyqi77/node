@@ -62,10 +62,6 @@ class V8_EXPORT HeapHandle {
 
 namespace internal {
 
-namespace testing {
-class TestWithHeap;
-}  // namespace testing
-
 class FatalOutOfMemoryHandler;
 class PageBackend;
 class PreFinalizerHandler;
@@ -125,6 +121,7 @@ class V8_EXPORT_PRIVATE HeapBase : public cppgc::HeapHandle {
   }
 
   MarkerBase* marker() const { return marker_.get(); }
+  std::unique_ptr<MarkerBase>& GetMarkerRefForTesting() { return marker_; }
 
   Compactor& compactor() { return compactor_; }
 
@@ -163,7 +160,7 @@ class V8_EXPORT_PRIVATE HeapBase : public cppgc::HeapHandle {
 
 #if defined(CPPGC_YOUNG_GENERATION)
   std::set<void*>& remembered_slots() { return remembered_slots_; }
-#endif
+#endif  // defined(CPPGC_YOUNG_GENERATION)
 
   size_t ObjectPayloadSize() const;
 
@@ -171,8 +168,6 @@ class V8_EXPORT_PRIVATE HeapBase : public cppgc::HeapHandle {
   const EmbedderStackState* override_stack_state() const {
     return override_stack_state_.get();
   }
-
-  void AdvanceIncrementalGarbageCollectionOnAllocationIfNeeded();
 
   // Termination drops all roots (clears them out) and runs garbage collections
   // in a bounded fixed point loop  until no new objects are created in
@@ -219,6 +214,10 @@ class V8_EXPORT_PRIVATE HeapBase : public cppgc::HeapHandle {
 
   // Returns amount of bytes allocated while executing prefinalizers.
   size_t ExecutePreFinalizers();
+
+#if defined(CPPGC_YOUNG_GENERATION)
+  void ResetRememberedSet();
+#endif  // defined(CPPGC_YOUNG_GENERATION)
 
   PageAllocator* page_allocator() const;
 
@@ -275,7 +274,6 @@ class V8_EXPORT_PRIVATE HeapBase : public cppgc::HeapHandle {
   int creation_thread_id_ = v8::base::OS::GetCurrentThreadId();
 
   friend class MarkerBase::IncrementalMarkingTask;
-  friend class testing::TestWithHeap;
   friend class cppgc::subtle::DisallowGarbageCollectionScope;
   friend class cppgc::subtle::NoGarbageCollectionScope;
   friend class cppgc::testing::Heap;

@@ -96,7 +96,7 @@ AllocationResult NewSpace::AllocateRaw(int size_in_bytes,
 
   AllocationResult result;
 
-  if (alignment != kWordAligned) {
+  if (USE_ALLOCATION_ALIGNMENT_BOOL && alignment != kTaggedAligned) {
     result = AllocateFastAligned(size_in_bytes, nullptr, alignment, origin);
   } else {
     result = AllocateFastUnaligned(size_in_bytes, origin);
@@ -144,7 +144,7 @@ AllocationResult NewSpace::AllocateFastAligned(
   DCHECK_SEMISPACE_ALLOCATION_INFO(allocation_info_, to_space_);
 
   if (filler_size > 0) {
-    obj = Heap::PrecedeWithFiller(ReadOnlyRoots(heap()), obj, filler_size);
+    obj = heap()->PrecedeWithFiller(obj, filler_size);
   }
 
   MSAN_ALLOCATED_UNINITIALIZED_MEMORY(obj.address(), size_in_bytes);

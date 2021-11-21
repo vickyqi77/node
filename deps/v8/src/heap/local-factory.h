@@ -57,7 +57,7 @@ class V8_EXPORT_PRIVATE LocalFactory : public FactoryBase<LocalFactory> {
   // ------
   // Customization points for FactoryBase.
   HeapObject AllocateRaw(int size, AllocationType allocation,
-                         AllocationAlignment alignment = kWordAligned);
+                         AllocationAlignment alignment = kTaggedAligned);
 
   LocalIsolate* isolate() {
     // Downcast to the privately inherited sub-class using c-style casts to
@@ -68,9 +68,14 @@ class V8_EXPORT_PRIVATE LocalFactory : public FactoryBase<LocalFactory> {
   }
   inline bool CanAllocateInReadOnlySpace() { return false; }
   inline bool EmptyStringRootIsInitialized() { return true; }
+  inline AllocationType AllocationTypeForInPlaceInternalizableString();
   // ------
 
   void AddToScriptList(Handle<Script> shared);
+
+  void SetExternalCodeSpaceInDataContainer(CodeDataContainer data_container) {
+    UNREACHABLE();
+  }
   // ------
 
   ReadOnlyRoots roots_;

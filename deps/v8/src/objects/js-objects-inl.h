@@ -398,7 +398,7 @@ void JSObject::FastPropertyAtPut(FieldIndex index, Object value,
 void JSObject::WriteToField(InternalIndex descriptor, PropertyDetails details,
                             Object value) {
   DCHECK_EQ(PropertyLocation::kField, details.location());
-  DCHECK_EQ(kData, details.kind());
+  DCHECK_EQ(PropertyKind::kData, details.kind());
   DisallowGarbageCollection no_gc;
   FieldIndex index = FieldIndex::ForDescriptor(map(), descriptor);
   if (details.representation().IsDouble()) {
@@ -470,7 +470,8 @@ void JSObject::InitializeBody(Map map, int start_offset,
 }
 
 DEF_GETTER(JSGlobalObject, native_context_unchecked, Object) {
-  return TaggedField<Object, kNativeContextOffset>::load(cage_base, *this);
+  return TaggedField<Object, kNativeContextOffset>::Relaxed_Load(cage_base,
+                                                                 *this);
 }
 
 bool JSMessageObject::DidEnsureSourcePositionsAvailable() const {
@@ -717,8 +718,6 @@ Maybe<bool> JSReceiver::HasProperty(Handle<JSReceiver> object,
 
 Maybe<bool> JSReceiver::HasOwnProperty(Handle<JSReceiver> object,
                                        uint32_t index) {
-  if (object->IsJSModuleNamespace()) return Just(false);
-
   if (object->IsJSObject()) {  // Shortcut.
     LookupIterator it(object->GetIsolate(), object, index, object,
                       LookupIterator::OWN);

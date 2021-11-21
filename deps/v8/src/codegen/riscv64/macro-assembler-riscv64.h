@@ -495,8 +495,10 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void SmiToInt32(Register smi);
 
   // Enabled via --debug-code.
-  void AssertNotSmi(Register object);
-  void AssertSmi(Register object);
+  void AssertNotSmi(Register object,
+                    AbortReason reason = AbortReason::kOperandIsASmi);
+  void AssertSmi(Register object,
+                 AbortReason reason = AbortReason::kOperandIsASmi);
 
   int CalculateStackPassedDWords(int num_gp_arguments, int num_fp_arguments);
 
@@ -851,6 +853,14 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void Floor_f(VRegister dst, VRegister src, Register scratch,
                VRegister v_scratch);
   void Floor_d(VRegister dst, VRegister src, Register scratch,
+               VRegister v_scratch);
+  void Trunc_f(VRegister dst, VRegister src, Register scratch,
+               VRegister v_scratch);
+  void Trunc_d(VRegister dst, VRegister src, Register scratch,
+               VRegister v_scratch);
+  void Round_f(VRegister dst, VRegister src, Register scratch,
+               VRegister v_scratch);
+  void Round_d(VRegister dst, VRegister src, Register scratch,
                VRegister v_scratch);
   // Jump the register contains a smi.
   void JumpIfSmi(Register value, Label* smi_label);
@@ -1252,6 +1262,15 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
     And(scratch, value, Operand(kSmiTagMask));
   }
 
+  enum ArgumentsCountMode { kCountIncludesReceiver, kCountExcludesReceiver };
+  enum ArgumentsCountType { kCountIsInteger, kCountIsSmi, kCountIsBytes };
+  void DropArguments(Register count, ArgumentsCountType type,
+                     ArgumentsCountMode mode, Register scratch = no_reg);
+  void DropArgumentsAndPushNewReceiver(Register argc, Register receiver,
+                                       ArgumentsCountType type,
+                                       ArgumentsCountMode mode,
+                                       Register scratch = no_reg);
+
   // Jump if the register contains a non-smi.
   void JumpIfNotSmi(Register value, Label* not_smi_label);
 
@@ -1261,6 +1280,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
 
   // Abort execution if argument is not a JSFunction, enabled via --debug-code.
   void AssertFunction(Register object);
+
+  // Abort execution if argument is not a callable JSFunction, enabled via
+  // --debug-code.
+  void AssertCallableFunction(Register object);
 
   // Abort execution if argument is not a JSBoundFunction,
   // enabled via --debug-code.

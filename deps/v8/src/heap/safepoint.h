@@ -20,9 +20,9 @@ class RootVisitor;
 
 // Used to bring all threads with heap access to a safepoint such that e.g. a
 // garbage collection can be performed.
-class GlobalSafepoint {
+class IsolateSafepoint final {
  public:
-  explicit GlobalSafepoint(Heap* heap);
+  explicit IsolateSafepoint(Heap* heap);
 
   // Wait until unpark operation is safe again
   void WaitInUnpark();
@@ -42,14 +42,14 @@ class GlobalSafepoint {
   // Iterate local heaps
   template <typename Callback>
   void IterateLocalHeaps(Callback callback) {
-    DCHECK(IsActive());
+    AssertActive();
     for (LocalHeap* current = local_heaps_head_; current;
          current = current->next_) {
       callback(current);
     }
   }
 
-  bool IsActive() { return active_safepoint_scopes_ > 0; }
+  void AssertActive() { local_heaps_mutex_.AssertHeld(); }
 
  private:
   class Barrier {
@@ -119,6 +119,8 @@ class GlobalSafepoint {
   int active_safepoint_scopes_;
 
   friend class Heap;
+  friend class GlobalSafepoint;
+  friend class GlobalSafepointScope;
   friend class LocalHeap;
   friend class PersistentHandles;
   friend class SafepointScope;
@@ -130,7 +132,48 @@ class V8_NODISCARD SafepointScope {
   V8_EXPORT_PRIVATE ~SafepointScope();
 
  private:
-  GlobalSafepoint* safepoint_;
+  IsolateSafepoint* safepoint_;
+};
+
+// Used for reaching a global safepoint, a safepoint across all client isolates
+// of the shared isolate.
+class GlobalSafepoint final {
+ public:
+  explicit GlobalSafepoint(Isolate* isolate);
+
+  void AppendClient(Isolate* client);
+  void RemoveClient(Isolate* client);
+
+  template <typename Callback>
+  void IterateClientIsolates(Callback callback) {
+    for (Isolate* current = clients_head_; current;
+         current = current->global_safepoint_next_client_isolate_) {
+      callback(current);
+    }
+  }
+
+  void AssertNoClients();
+
+ private:
+  void EnterGlobalSafepointScope(Isolate* initiator);
+  void LeaveGlobalSafepointScope(Isolate* initiator);
+
+  Isolate* const shared_isolate_;
+  Heap* const shared_heap_;
+  base::Mutex clients_mutex_;
+  Isolate* clients_head_ = nullptr;
+
+  friend class GlobalSafepointScope;
+};
+
+class V8_NODISCARD GlobalSafepointScope {
+ public:
+  V8_EXPORT_PRIVATE explicit GlobalSafepointScope(Isolate* initiator);
+  V8_EXPORT_PRIVATE ~GlobalSafepointScope();
+
+ private:
+  Isolate* const initiator_;
+  Isolate* const shared_isolate_;
 };
 
 }  // namespace internal

@@ -15,6 +15,7 @@
 #include "src/heap/cppgc/prefinalizer-handler.h"
 #include "src/heap/cppgc/stats-collector.h"
 #include "src/heap/cppgc/sweeper.h"
+#include "src/heap/cppgc/unmarker.h"
 
 namespace cppgc {
 
@@ -61,19 +62,6 @@ namespace internal {
 
 namespace {
 
-class Unmarker final : private HeapVisitor<Unmarker> {
-  friend class HeapVisitor<Unmarker>;
-
- public:
-  explicit Unmarker(RawHeap& heap) { Traverse(heap); }
-
- private:
-  bool VisitHeapObjectHeader(HeapObjectHeader& header) {
-    if (header.IsMarked()) header.Unmark();
-    return true;
-  }
-};
-
 void CheckConfig(Heap::Config config, Heap::MarkingType marking_support,
                  Heap::SweepingType sweeping_support) {
   CHECK_WITH_MSG(
@@ -104,9 +92,16 @@ Heap::Heap(std::shared_ptr<cppgc::Platform> platform,
 }
 
 Heap::~Heap() {
-  subtle::NoGarbageCollectionScope no_gc(*this);
-  // Finish already running GC if any, but don't finalize live objects.
-  sweeper_.FinishIfRunning();
+  // Gracefully finish already running GC if any, but don't finalize live
+  // objects.
+  FinalizeIncrementalGarbageCollectionIfRunning(
+      {Config::CollectionType::kMajor,
+       Config::StackState::kMayContainHeapPointers,
+       Config::MarkingType::kAtomic, Config::SweepingType::kAtomic});
+  {
+    subtle::NoGarbageCollectionScope no_gc(*this);
+    sweeper_.FinishIfRunning();
+  }
 }
 
 void Heap::CollectGarbage(Config config) {
@@ -160,8 +155,8 @@ void Heap::StartGarbageCollection(Config config) {
 
 #if defined(CPPGC_YOUNG_GENERATION)
   if (config.collection_type == Config::CollectionType::kMajor)
-    Unmarker unmarker(raw_heap());
-#endif
+    SequentialUnmarker unmarker(raw_heap());
+#endif  // defined(CPPGC_YOUNG_GENERATION)
 
   const Marker::MarkingConfig marking_config{
       config.collection_type, config.stack_state, config.marking_type,
@@ -189,7 +184,7 @@ void Heap::FinalizeGarbageCollection(Config::StackState stack_state) {
   marker_.reset();
   const size_t bytes_allocated_in_prefinalizers = ExecutePreFinalizers();
 #if CPPGC_VERIFY_HEAP
-  MarkingVerifier verifier(*this);
+  MarkingVerifier verifier(*this, config_.collection_type);
   verifier.Run(
       config_.stack_state, stack_end_of_current_gc(),
       stats_collector()->marked_bytes() + bytes_allocated_in_prefinalizers);
@@ -198,6 +193,10 @@ void Heap::FinalizeGarbageCollection(Config::StackState stack_state) {
   DCHECK_EQ(0u, bytes_allocated_in_prefinalizers);
 #endif
   USE(bytes_allocated_in_prefinalizers);
+
+#if defined(CPPGC_YOUNG_GENERATION)
+  ResetRememberedSet();
+#endif  // defined(CPPGC_YOUNG_GENERATION)
 
   subtle::NoGarbageCollectionScope no_gc(*this);
   const Sweeper::SweepingConfig sweeping_config{

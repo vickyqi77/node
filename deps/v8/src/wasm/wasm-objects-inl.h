@@ -47,9 +47,12 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(WasmModuleObject)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmTableObject)
 TQ_OBJECT_CONSTRUCTORS_IMPL(AsmWasmData)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmFunctionData)
+TQ_OBJECT_CONSTRUCTORS_IMPL(WasmApiFunctionRef)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmTypeInfo)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmStruct)
 TQ_OBJECT_CONSTRUCTORS_IMPL(WasmArray)
+TQ_OBJECT_CONSTRUCTORS_IMPL(WasmContinuationObject)
+TQ_OBJECT_CONSTRUCTORS_IMPL(WasmSuspenderObject)
 
 CAST_ACCESSOR(WasmInstanceObject)
 
@@ -222,8 +225,8 @@ PRIMITIVE_ACCESSORS(WasmInstanceObject, dropped_elem_segments, byte*,
                     kDroppedElemSegmentsOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, hook_on_function_call_address, Address,
                     kHookOnFunctionCallAddressOffset)
-PRIMITIVE_ACCESSORS(WasmInstanceObject, num_liftoff_function_calls_array,
-                    uint32_t*, kNumLiftoffFunctionCallsArrayOffset)
+PRIMITIVE_ACCESSORS(WasmInstanceObject, tiering_budget_array, uint32_t*,
+                    kTieringBudgetArrayOffset)
 PRIMITIVE_ACCESSORS(WasmInstanceObject, break_on_entry, uint8_t,
                     kBreakOnEntryOffset)
 
@@ -253,6 +256,8 @@ OPTIONAL_ACCESSORS(WasmInstanceObject, wasm_external_functions, FixedArray,
                    kWasmExternalFunctionsOffset)
 ACCESSORS(WasmInstanceObject, managed_object_maps, FixedArray,
           kManagedObjectMapsOffset)
+ACCESSORS(WasmInstanceObject, feedback_vectors, FixedArray,
+          kFeedbackVectorsOffset)
 
 void WasmInstanceObject::clear_padding() {
   if (FIELD_SIZE(kOptionalPaddingOffset) != 0) {
@@ -260,32 +265,6 @@ void WasmInstanceObject::clear_padding() {
     memset(reinterpret_cast<void*>(address() + kOptionalPaddingOffset), 0,
            FIELD_SIZE(kOptionalPaddingOffset));
   }
-}
-
-IndirectFunctionTableEntry::IndirectFunctionTableEntry(
-    Handle<WasmInstanceObject> instance, int table_index, int entry_index)
-    : instance_(table_index == 0 ? instance
-                                 : Handle<WasmInstanceObject>::null()),
-      table_(table_index != 0
-                 ? handle(WasmIndirectFunctionTable::cast(
-                              instance->indirect_function_tables().get(
-                                  table_index)),
-                          instance->GetIsolate())
-                 : Handle<WasmIndirectFunctionTable>::null()),
-      index_(entry_index) {
-  DCHECK_GE(entry_index, 0);
-  DCHECK_LT(entry_index, table_index == 0
-                             ? instance->indirect_function_table_size()
-                             : table_->size());
-}
-
-IndirectFunctionTableEntry::IndirectFunctionTableEntry(
-    Handle<WasmIndirectFunctionTable> table, int entry_index)
-    : instance_(Handle<WasmInstanceObject>::null()),
-      table_(table),
-      index_(entry_index) {
-  DCHECK_GE(entry_index, 0);
-  DCHECK_LT(entry_index, table_->size());
 }
 
 ImportedFunctionEntry::ImportedFunctionEntry(
@@ -542,10 +521,10 @@ wasm::StructType* WasmStruct::type(Map map) {
 wasm::StructType* WasmStruct::GcSafeType(Map map) {
   DCHECK_EQ(WASM_STRUCT_TYPE, map.instance_type());
   HeapObject raw = HeapObject::cast(map.constructor_or_back_pointer());
-  MapWord map_word = raw.map_word(kRelaxedLoad);
-  HeapObject forwarded =
-      map_word.IsForwardingAddress() ? map_word.ToForwardingAddress() : raw;
-  Foreign foreign = Foreign::cast(forwarded);
+  // The {Foreign} might be in the middle of being moved, which is why we
+  // can't read its map for a checked cast. But we can rely on its payload
+  // being intact in the old location.
+  Foreign foreign = Foreign::unchecked_cast(raw);
   return reinterpret_cast<wasm::StructType*>(foreign.foreign_address());
 }
 
@@ -618,10 +597,10 @@ wasm::ArrayType* WasmArray::type(Map map) {
 wasm::ArrayType* WasmArray::GcSafeType(Map map) {
   DCHECK_EQ(WASM_ARRAY_TYPE, map.instance_type());
   HeapObject raw = HeapObject::cast(map.constructor_or_back_pointer());
-  MapWord map_word = raw.map_word(kRelaxedLoad);
-  HeapObject forwarded =
-      map_word.IsForwardingAddress() ? map_word.ToForwardingAddress() : raw;
-  Foreign foreign = Foreign::cast(forwarded);
+  // The {Foreign} might be in the middle of being moved, which is why we
+  // can't read its map for a checked cast. But we can rely on its payload
+  // being intact in the old location.
+  Foreign foreign = Foreign::unchecked_cast(raw);
   return reinterpret_cast<wasm::ArrayType*>(foreign.foreign_address());
 }
 

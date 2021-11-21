@@ -343,6 +343,10 @@ KeyedAccessMode KeyedAccessMode::FromNexus(FeedbackNexus const& nexus) {
   if (IsKeyedHasICKind(kind)) {
     return KeyedAccessMode(AccessMode::kHas, nexus.GetKeyedAccessLoadMode());
   }
+  if (IsDefineOwnICKind(kind)) {
+    return KeyedAccessMode(AccessMode::kDefine,
+                           nexus.GetKeyedAccessStoreMode());
+  }
   if (IsKeyedStoreICKind(kind)) {
     return KeyedAccessMode(AccessMode::kStore, nexus.GetKeyedAccessStoreMode());
   }
@@ -361,6 +365,7 @@ bool KeyedAccessMode::IsLoad() const {
 }
 bool KeyedAccessMode::IsStore() const {
   return access_mode_ == AccessMode::kStore ||
+         access_mode_ == AccessMode::kDefine ||
          access_mode_ == AccessMode::kStoreInLiteral;
 }
 
@@ -401,7 +406,8 @@ ElementAccessFeedback::ElementAccessFeedback(Zone* zone,
   DCHECK(IsKeyedLoadICKind(slot_kind) || IsKeyedHasICKind(slot_kind) ||
          IsStoreDataPropertyInLiteralKind(slot_kind) ||
          IsKeyedStoreICKind(slot_kind) ||
-         IsStoreInArrayLiteralICKind(slot_kind));
+         IsStoreInArrayLiteralICKind(slot_kind) ||
+         IsDefineOwnICKind(slot_kind));
 }
 
 bool ElementAccessFeedback::HasOnlyStringMaps(JSHeapBroker* broker) const {
@@ -435,7 +441,8 @@ NamedAccessFeedback::NamedAccessFeedback(NameRef const& name,
          IsStoreOwnICKind(slot_kind) || IsKeyedLoadICKind(slot_kind) ||
          IsKeyedHasICKind(slot_kind) || IsKeyedStoreICKind(slot_kind) ||
          IsStoreInArrayLiteralICKind(slot_kind) ||
-         IsStoreDataPropertyInLiteralKind(slot_kind));
+         IsStoreDataPropertyInLiteralKind(slot_kind) ||
+         IsDefineOwnICKind(slot_kind));
 }
 
 void JSHeapBroker::SetFeedback(FeedbackSource const& source,
@@ -583,7 +590,7 @@ ProcessedFeedback const& JSHeapBroker::ReadFeedbackForPropertyAccess(
     // We rely on this invariant in JSGenericLowering.
     DCHECK_IMPLIES(maps.empty(), nexus.ic_state() == MEGAMORPHIC);
     return *zone()->New<NamedAccessFeedback>(*name, maps, kind);
-  } else if (nexus.GetKeyType() == ELEMENT && !maps.empty()) {
+  } else if (nexus.GetKeyType() == IcCheckType::kElement && !maps.empty()) {
     return ProcessFeedbackMapsForElementAccess(
         maps, KeyedAccessMode::FromNexus(nexus), kind);
   } else {

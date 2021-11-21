@@ -50,6 +50,11 @@ class BuildFlags : public ContextualClass<BuildFlags> {
     build_flags_["TAGGED_SIZE_8_BYTES"] = TAGGED_SIZE_8_BYTES;
     build_flags_["TRUE_FOR_TESTING"] = true;
     build_flags_["FALSE_FOR_TESTING"] = false;
+#ifdef V8_SCRIPTORMODULE_LEGACY_LIFETIME
+    build_flags_["V8_SCRIPTORMODULE_LEGACY_LIFETIME"] = true;
+#else
+    build_flags_["V8_SCRIPTORMODULE_LEGACY_LIFETIME"] = false;
+#endif
   }
   static bool GetFlag(const std::string& name, const char* production) {
     auto it = Get().build_flags_.find(name);
@@ -523,6 +528,15 @@ base::Optional<ParseResult> MakeDebugStatement(
   return ParseResult{result};
 }
 
+base::Optional<ParseResult> DeprecatedMakeVoidType(
+    ParseResultIterator* child_results) {
+  Error("Default void return types are deprecated. Add `: void`.");
+  TypeExpression* result = MakeNode<BasicTypeExpression>(
+      std::vector<std::string>{}, MakeNode<Identifier>("void"),
+      std::vector<TypeExpression*>{});
+  return ParseResult{result};
+}
+
 base::Optional<ParseResult> MakeExternalMacro(
     ParseResultIterator* child_results) {
   auto transitioning = child_results->NextAs<bool>();
@@ -885,6 +899,7 @@ base::Optional<ParseResult> MakeClassDeclaration(
        ANNOTATION_DO_NOT_GENERATE_CPP_CLASS, ANNOTATION_CUSTOM_CPP_CLASS,
        ANNOTATION_CUSTOM_MAP, ANNOTATION_GENERATE_BODY_DESCRIPTOR,
        ANNOTATION_EXPORT, ANNOTATION_DO_NOT_GENERATE_CAST,
+       ANNOTATION_GENERATE_UNIQUE_MAP, ANNOTATION_GENERATE_FACTORY_FUNCTION,
        ANNOTATION_HIGHEST_INSTANCE_TYPE_WITHIN_PARENT,
        ANNOTATION_LOWEST_INSTANCE_TYPE_WITHIN_PARENT},
       {ANNOTATION_RESERVE_BITS_IN_INSTANCE_TYPE,
@@ -899,16 +914,28 @@ base::Optional<ParseResult> MakeClassDeclaration(
   bool do_not_generate_cpp_class =
       annotations.Contains(ANNOTATION_DO_NOT_GENERATE_CPP_CLASS);
   if (annotations.Contains(ANNOTATION_CUSTOM_CPP_CLASS)) {
-    flags |= ClassFlag::kCustomCppClass;
+    Error(
+        "@customCppClass is deprecated. Use 'extern' instead. "
+        "@generateBodyDescriptor, @generateUniqueMap, and "
+        "@generateFactoryFunction accomplish most of what '@export "
+        "@customCppClass' used to.");
   }
   if (annotations.Contains(ANNOTATION_CUSTOM_MAP)) {
-    flags |= ClassFlag::kCustomMap;
+    Error(
+        "@customMap is deprecated. Generating a unique map is opt-in now using "
+        "@generateUniqueMap.");
   }
   if (annotations.Contains(ANNOTATION_DO_NOT_GENERATE_CAST)) {
     flags |= ClassFlag::kDoNotGenerateCast;
   }
   if (annotations.Contains(ANNOTATION_GENERATE_BODY_DESCRIPTOR)) {
     flags |= ClassFlag::kGenerateBodyDescriptor;
+  }
+  if (annotations.Contains(ANNOTATION_GENERATE_UNIQUE_MAP)) {
+    flags |= ClassFlag::kGenerateUniqueMap;
+  }
+  if (annotations.Contains(ANNOTATION_GENERATE_FACTORY_FUNCTION)) {
+    flags |= ClassFlag::kGenerateFactoryFunction;
   }
   if (annotations.Contains(ANNOTATION_EXPORT)) {
     flags |= ClassFlag::kExport;
@@ -1960,7 +1987,8 @@ base::Optional<ParseResult> MakeClassField(ParseResultIterator* child_results) {
   AnnotationSet annotations(
       child_results,
       {ANNOTATION_CPP_RELAXED_STORE, ANNOTATION_CPP_RELAXED_LOAD,
-       ANNOTATION_CPP_RELEASE_STORE, ANNOTATION_CPP_ACQUIRE_LOAD},
+       ANNOTATION_CPP_RELEASE_STORE, ANNOTATION_CPP_ACQUIRE_LOAD,
+       ANNOTATION_CUSTOM_WEAK_MARKING},
       {ANNOTATION_IF, ANNOTATION_IFNOT});
   FieldSynchronization write_synchronization = FieldSynchronization::kNone;
   if (annotations.Contains(ANNOTATION_CPP_RELEASE_STORE)) {
@@ -1986,7 +2014,16 @@ base::Optional<ParseResult> MakeClassField(ParseResultIterator* child_results) {
     conditions.push_back(
         {*ifnot_condition, ConditionalAnnotationType::kNegative});
   }
-  auto weak = child_results->NextAs<bool>();
+  bool custom_weak_marking =
+      annotations.Contains(ANNOTATION_CUSTOM_WEAK_MARKING);
+  auto deprecated_weak = child_results->NextAs<bool>();
+  if (deprecated_weak) {
+    Error(
+        "The keyword 'weak' is deprecated. For a field that can contain a "
+        "normal weak pointer, use type Weak<T>. For a field that should be "
+        "marked in some custom way, use @customWeakMarking.");
+    custom_weak_marking = true;
+  }
   auto const_qualified = child_results->NextAs<bool>();
   auto name = child_results->NextAs<Identifier*>();
   auto optional = child_results->NextAs<bool>();
@@ -2011,7 +2048,7 @@ base::Optional<ParseResult> MakeClassField(ParseResultIterator* child_results) {
   return ParseResult{ClassFieldExpression{{name, type},
                                           index_info,
                                           std::move(conditions),
-                                          weak,
+                                          custom_weak_marking,
                                           const_qualified,
                                           read_synchronization,
                                           write_synchronization}};
@@ -2261,6 +2298,10 @@ struct TorqueGrammar : Grammar {
       {&name,
        TryOrDefault<TypeList>(Sequence({Token("("), typeList, Token(")")}))},
       MakeLabelAndTypes)};
+
+  // Result: TypeExpression*
+  Symbol returnType = {Rule({Token(":"), &type}),
+                       Rule({}, DeprecatedMakeVoidType)};
 
   // Result: LabelAndTypesVector
   Symbol* optionalLabelList{TryOrDefault<LabelAndTypesVector>(
@@ -2569,7 +2610,7 @@ struct TorqueGrammar : Grammar {
   Symbol method = {Rule(
       {CheckIf(Token("transitioning")),
        Optional<std::string>(Sequence({Token("operator"), &externalString})),
-       Token("macro"), &name, &parameterListNoVararg, Token(":"), &type,
+       Token("macro"), &name, &parameterListNoVararg, &returnType,
        optionalLabelList, &block},
       MakeMethodDeclaration)};
 
@@ -2616,7 +2657,7 @@ struct TorqueGrammar : Grammar {
            AsSingletonVector<Declaration*, MakeTypeAliasDeclaration>()),
       Rule({Token("intrinsic"), &intrinsicName,
             TryOrDefault<GenericParameters>(&genericParameters),
-            &parameterListNoVararg, Token(":"), &type, &optionalBody},
+            &parameterListNoVararg, &returnType, &optionalBody},
            AsSingletonVector<Declaration*, MakeIntrinsicDeclaration>()),
       Rule({Token("extern"), CheckIf(Token("transitioning")),
             Optional<std::string>(
@@ -2624,33 +2665,32 @@ struct TorqueGrammar : Grammar {
             Token("macro"),
             Optional<std::string>(Sequence({&identifier, Token("::")})), &name,
             TryOrDefault<GenericParameters>(&genericParameters),
-            &typeListMaybeVarArgs, Token(":"), &type, optionalLabelList,
-            Token(";")},
+            &typeListMaybeVarArgs, &returnType, optionalLabelList, Token(";")},
            AsSingletonVector<Declaration*, MakeExternalMacro>()),
       Rule({Token("extern"), CheckIf(Token("transitioning")),
             CheckIf(Token("javascript")), Token("builtin"), &name,
             TryOrDefault<GenericParameters>(&genericParameters),
-            &typeListMaybeVarArgs, Token(":"), &type, Token(";")},
+            &typeListMaybeVarArgs, &returnType, Token(";")},
            AsSingletonVector<Declaration*, MakeExternalBuiltin>()),
       Rule({Token("extern"), CheckIf(Token("transitioning")), Token("runtime"),
-            &name, &typeListMaybeVarArgs, Token(":"), &type, Token(";")},
+            &name, &typeListMaybeVarArgs, &returnType, Token(";")},
            AsSingletonVector<Declaration*, MakeExternalRuntime>()),
       Rule({annotations, CheckIf(Token("transitioning")),
             Optional<std::string>(
                 Sequence({Token("operator"), &externalString})),
             Token("macro"), &name,
             TryOrDefault<GenericParameters>(&genericParameters),
-            &parameterListNoVararg, Token(":"), &type, optionalLabelList,
+            &parameterListNoVararg, &returnType, optionalLabelList,
             &optionalBody},
            AsSingletonVector<Declaration*, MakeTorqueMacroDeclaration>()),
       Rule({CheckIf(Token("transitioning")), CheckIf(Token("javascript")),
             Token("builtin"), &name,
             TryOrDefault<GenericParameters>(&genericParameters),
-            &parameterListAllowVararg, Token(":"), &type, &optionalBody},
+            &parameterListAllowVararg, &returnType, &optionalBody},
            AsSingletonVector<Declaration*, MakeTorqueBuiltinDeclaration>()),
       Rule({CheckIf(Token("transitioning")), &name,
             &genericSpecializationTypeList, &parameterListAllowVararg,
-            Token(":"), &type, optionalLabelList, &block},
+            &returnType, optionalLabelList, &block},
            AsSingletonVector<Declaration*, MakeSpecializationDeclaration>()),
       Rule({Token("#include"), &externalString},
            AsSingletonVector<Declaration*, MakeCppIncludeDeclaration>()),

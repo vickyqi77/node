@@ -3744,25 +3744,14 @@ void CodeGenerator::AssembleConstructFrame() {
       // efficient intialization of the constant pool pointer register).
       __ StubPrologue(type);
 #if V8_ENABLE_WEBASSEMBLY
-      if (call_descriptor->IsWasmFunctionCall()) {
+      if (call_descriptor->IsWasmFunctionCall() ||
+          call_descriptor->IsWasmImportWrapper() ||
+          call_descriptor->IsWasmCapiFunction()) {
         __ Push(kWasmInstanceRegister);
-      } else if (call_descriptor->IsWasmImportWrapper() ||
-                 call_descriptor->IsWasmCapiFunction()) {
-        // Wasm import wrappers are passed a tuple in the place of the instance.
-        // Unpack the tuple into the instance and the target callable.
-        // This must be done here in the codegen because it cannot be expressed
-        // properly in the graph.
-        __ LoadTaggedPointerField(
-            kJSFunctionRegister,
-            FieldMemOperand(kWasmInstanceRegister, Tuple2::kValue2Offset), r0);
-        __ LoadTaggedPointerField(
-            kWasmInstanceRegister,
-            FieldMemOperand(kWasmInstanceRegister, Tuple2::kValue1Offset), r0);
-        __ Push(kWasmInstanceRegister);
-        if (call_descriptor->IsWasmCapiFunction()) {
-          // Reserve space for saving the PC later.
-          __ lay(sp, MemOperand(sp, -kSystemPointerSize));
-        }
+      }
+      if (call_descriptor->IsWasmCapiFunction()) {
+        // Reserve space for saving the PC later.
+        __ lay(sp, MemOperand(sp, -kSystemPointerSize));
       }
 #endif  // V8_ENABLE_WEBASSEMBLY
     }
@@ -3925,15 +3914,25 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
     // max(argc_reg, parameter_slots-1), and the receiver is added in
     // DropArguments().
     if (parameter_slots > 1) {
-      const int parameter_slots_without_receiver = parameter_slots - 1;
-      Label skip;
-      __ CmpS64(argc_reg, Operand(parameter_slots_without_receiver));
-      __ bgt(&skip);
-      __ mov(argc_reg, Operand(parameter_slots_without_receiver));
-      __ bind(&skip);
+      if (kJSArgcIncludesReceiver) {
+        Label skip;
+        __ CmpS64(argc_reg, Operand(parameter_slots));
+        __ bgt(&skip);
+        __ mov(argc_reg, Operand(parameter_slots));
+        __ bind(&skip);
+      } else {
+        const int parameter_slots_without_receiver = parameter_slots - 1;
+        Label skip;
+        __ CmpS64(argc_reg, Operand(parameter_slots_without_receiver));
+        __ bgt(&skip);
+        __ mov(argc_reg, Operand(parameter_slots_without_receiver));
+        __ bind(&skip);
+      }
     }
     __ DropArguments(argc_reg, TurboAssembler::kCountIsInteger,
-                     TurboAssembler::kCountExcludesReceiver);
+                     kJSArgcIncludesReceiver
+                         ? TurboAssembler::kCountIncludesReceiver
+                         : TurboAssembler::kCountExcludesReceiver);
   } else if (additional_pop_count->IsImmediate()) {
     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
     __ Drop(parameter_slots + additional_count);

@@ -1273,7 +1273,7 @@ bool JSObjectData::SerializeAsBoilerplateRecursive(JSHeapBroker* broker,
   for (InternalIndex i : boilerplate->map().IterateOwnDescriptors()) {
     PropertyDetails details = descriptors->GetDetails(i);
     if (details.location() != PropertyLocation::kField) continue;
-    DCHECK_EQ(kData, details.kind());
+    DCHECK_EQ(PropertyKind::kData, details.kind());
 
     FieldIndex field_index = FieldIndex::ForDescriptor(boilerplate->map(), i);
     // Make sure {field_index} agrees with {inobject_properties} on the index of
@@ -1469,7 +1469,7 @@ ObjectData* JSHeapBroker::TryGetOrCreateData(Handle<Object> object,
 
 #define CREATE_DATA(Name)                                             \
   if (object->Is##Name()) {                                           \
-    RefsMap::Entry* entry = refs_->LookupOrInsert(object.address());  \
+    entry = refs_->LookupOrInsert(object.address());                  \
     object_data = zone()->New<ref_traits<Name>::data_type>(           \
         this, &entry->value, Handle<Name>::cast(object),              \
         ObjectDataKindFor(ref_traits<Name>::ref_serialization_kind)); \
@@ -1801,6 +1801,17 @@ base::Optional<ObjectRef> StringRef::GetCharAsStringOrUndefined(
 bool StringRef::SupportedStringKind() const {
   if (!broker()->is_concurrent_inlining()) return true;
   return IsInternalizedString() || object()->IsThinString();
+}
+
+base::Optional<Handle<String>> StringRef::ObjectIfContentAccessible() {
+  if (data_->kind() == kNeverSerializedHeapObject && !SupportedStringKind()) {
+    TRACE_BROKER_MISSING(
+        broker(),
+        "content for kNeverSerialized unsupported string kind " << *this);
+    return base::nullopt;
+  } else {
+    return object();
+  }
 }
 
 base::Optional<int> StringRef::length() const {
@@ -2776,6 +2787,10 @@ SharedFunctionInfoRef::function_template_info() const {
 
 int SharedFunctionInfoRef::context_header_size() const {
   return object()->scope_info().ContextHeaderLength();
+}
+
+int SharedFunctionInfoRef::context_parameters_start() const {
+  return object()->scope_info().ParametersStartIndex();
 }
 
 ScopeInfoRef SharedFunctionInfoRef::scope_info() const {

@@ -476,6 +476,7 @@ std::atomic<int> Shell::unhandled_promise_rejections_{0};
 
 Global<Context> Shell::evaluation_context_;
 ArrayBuffer::Allocator* Shell::array_buffer_allocator;
+Isolate* Shell::shared_isolate = nullptr;
 bool check_d8_flag_contradictions = true;
 ShellOptions Shell::options;
 base::OnceType Shell::quit_once_ = V8_ONCE_INIT;
@@ -643,9 +644,39 @@ MaybeLocal<T> Shell::CompileString(Isolate* isolate, Local<Context> context,
   return result;
 }
 
+namespace {
+// For testing.
+const int kHostDefinedOptionsLength = 2;
+const uint32_t kHostDefinedOptionsMagicConstant = 0xF1F2F3F0;
+
+ScriptOrigin CreateScriptOrigin(Isolate* isolate, Local<String> resource_name,
+                                v8::ScriptType type) {
+  Local<PrimitiveArray> options =
+      PrimitiveArray::New(isolate, kHostDefinedOptionsLength);
+  options->Set(isolate, 0,
+               v8::Uint32::New(isolate, kHostDefinedOptionsMagicConstant));
+  options->Set(isolate, 1, resource_name);
+  return ScriptOrigin(isolate, resource_name, 0, 0, false, -1, Local<Value>(),
+                      false, false, type == v8::ScriptType::kModule, options);
+}
+
+bool IsValidHostDefinedOptions(Local<Context> context, Local<Data> options,
+                               Local<Value> resource_name) {
+  if (!options->IsFixedArray()) return false;
+  Local<FixedArray> array = options.As<FixedArray>();
+  if (array->Length() != kHostDefinedOptionsLength) return false;
+  uint32_t magic = 0;
+  if (!array->Get(context, 0).As<Value>()->Uint32Value(context).To(&magic)) {
+    return false;
+  }
+  if (magic != kHostDefinedOptionsMagicConstant) return false;
+  return array->Get(context, 1).As<String>()->StrictEquals(resource_name);
+}
+}  // namespace
+
 // Executes a string within the current v8 context.
 bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
-                          Local<Value> name, PrintResult print_result,
+                          Local<String> name, PrintResult print_result,
                           ReportExceptions report_exceptions,
                           ProcessMessageQueue process_message_queue) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
@@ -701,9 +732,9 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
     Local<Context> realm =
         Local<Context>::New(isolate, data->realms_[data->realm_current_]);
     Context::Scope context_scope(realm);
-    MaybeLocal<Script> maybe_script;
     Local<Context> context(isolate->GetCurrentContext());
-    ScriptOrigin origin(isolate, name);
+    ScriptOrigin origin =
+        CreateScriptOrigin(isolate, name, ScriptType::kClassic);
 
     for (int i = 1; i < options.repeat_compile; ++i) {
       HandleScope handle_scope_for_compiling(isolate);
@@ -725,8 +756,14 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
       StoreInCodeCache(isolate, source, cached_data);
       delete cached_data;
     }
-    if (options.compile_only) {
-      return true;
+    if (options.compile_only) return true;
+    if (options.compile_options == ScriptCompiler::kConsumeCodeCache) {
+      i::Handle<i::Script> i_script(
+          i::Script::cast(Utils::OpenHandle(*script)->shared().script()),
+          i_isolate);
+      // TODO(cbruni, chromium:1244145): remove once context-allocated.
+      i_script->set_host_defined_options(i::FixedArray::cast(
+          *Utils::OpenHandle(*(origin.GetHostDefinedOptions()))));
     }
     maybe_result = script->Run(realm);
     if (options.code_cache_options ==
@@ -744,6 +781,11 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
     data->realm_current_ = data->realm_switch_;
 
     if (options.web_snapshot_config) {
+      const char* web_snapshot_output_file_name = "web.snap";
+      if (options.web_snapshot_output) {
+        web_snapshot_output_file_name = options.web_snapshot_output;
+      }
+
       MaybeLocal<PrimitiveArray> maybe_exports =
           ReadLines(isolate, options.web_snapshot_config);
       Local<PrimitiveArray> exports;
@@ -758,12 +800,17 @@ bool Shell::ExecuteString(Isolate* isolate, Local<String> source,
       i::WebSnapshotData snapshot_data;
       if (serializer.TakeSnapshot(context, exports, snapshot_data)) {
         DCHECK_NOT_NULL(snapshot_data.buffer);
-        WriteChars("web.snap", snapshot_data.buffer, snapshot_data.buffer_size);
+        WriteChars(web_snapshot_output_file_name, snapshot_data.buffer,
+                   snapshot_data.buffer_size);
       } else {
         CHECK(try_catch.HasCaught());
         ReportException(isolate, &try_catch);
         return false;
       }
+    } else if (options.web_snapshot_output) {
+      isolate->ThrowError(
+          "Web snapshots: --web-snapshot-config is needed when "
+          "--web-snapshot-output is passed");
     }
   }
   Local<Value> result;
@@ -994,9 +1041,11 @@ MaybeLocal<Module> Shell::FetchModuleTree(Local<Module> referrer,
         v8::String::NewFromUtf8(isolate, msg.c_str()).ToLocalChecked());
     return MaybeLocal<Module>();
   }
-  ScriptOrigin origin(
-      isolate, String::NewFromUtf8(isolate, file_name.c_str()).ToLocalChecked(),
-      0, 0, false, -1, Local<Value>(), false, false, true);
+
+  Local<String> resource_name =
+      String::NewFromUtf8(isolate, file_name.c_str()).ToLocalChecked();
+  ScriptOrigin origin =
+      CreateScriptOrigin(isolate, resource_name, ScriptType::kModule);
 
   Local<Module> module;
   if (module_type == ModuleType::kJavaScript) {
@@ -1174,23 +1223,30 @@ void Shell::ModuleResolutionFailureCallback(
 }
 
 MaybeLocal<Promise> Shell::HostImportModuleDynamically(
-    Local<Context> context, Local<ScriptOrModule> referrer,
-    Local<String> specifier, Local<FixedArray> import_assertions) {
+    Local<Context> context, Local<Data> host_defined_options,
+    Local<Value> resource_name, Local<String> specifier,
+    Local<FixedArray> import_assertions) {
   Isolate* isolate = context->GetIsolate();
 
   MaybeLocal<Promise::Resolver> maybe_resolver =
       Promise::Resolver::New(context);
   Local<Promise::Resolver> resolver;
-  if (maybe_resolver.ToLocal(&resolver)) {
+  if (!maybe_resolver.ToLocal(&resolver)) return MaybeLocal<Promise>();
+
+  if (!IsValidHostDefinedOptions(context, host_defined_options,
+                                 resource_name)) {
+    resolver
+        ->Reject(context, v8::Exception::TypeError(String::NewFromUtf8Literal(
+                              isolate, "Invalid host defined options")))
+        .ToChecked();
+  } else {
     DynamicImportData* data =
-        new DynamicImportData(isolate, referrer->GetResourceName().As<String>(),
-                              specifier, import_assertions, resolver);
+        new DynamicImportData(isolate, resource_name.As<String>(), specifier,
+                              import_assertions, resolver);
     PerIsolateData::Get(isolate)->AddDynamicImportData(data);
     isolate->EnqueueMicrotask(Shell::DoHostImportModuleDynamically, data);
-    return resolver->GetPromise();
   }
-
-  return MaybeLocal<Promise>();
+  return resolver->GetPromise();
 }
 
 void Shell::HostInitializeImportMetaObject(Local<Context> context,
@@ -1378,26 +1434,16 @@ bool Shell::ExecuteWebSnapshot(Isolate* isolate, const char* file_name) {
 
   std::string absolute_path = NormalizePath(file_name, GetWorkingDirectory());
 
-  TryCatch try_catch(isolate);
-  try_catch.SetVerbose(true);
   int length = 0;
   std::unique_ptr<uint8_t[]> snapshot_data(
       reinterpret_cast<uint8_t*>(ReadChars(absolute_path.c_str(), &length)));
   if (length == 0) {
     isolate->ThrowError("Error reading the web snapshot");
-    DCHECK(try_catch.HasCaught());
-    ReportException(isolate, &try_catch);
     return false;
   }
   i::WebSnapshotDeserializer deserializer(isolate);
-  if (!deserializer.UseWebSnapshot(snapshot_data.get(),
-                                   static_cast<size_t>(length))) {
-    DCHECK(try_catch.HasCaught());
-    ReportException(isolate, &try_catch);
-    return false;
-  }
-  DCHECK(!try_catch.HasCaught());
-  return true;
+  return deserializer.UseWebSnapshot(snapshot_data.get(),
+                                     static_cast<size_t>(length));
 }
 
 PerIsolateData::PerIsolateData(Isolate* isolate)
@@ -1819,9 +1865,10 @@ void Shell::RealmEval(const v8::FunctionCallbackInfo<v8::Value>& args) {
     isolate->ThrowError("Invalid argument");
     return;
   }
-  ScriptOrigin origin(isolate,
-                      String::NewFromUtf8Literal(isolate, "(d8)",
-                                                 NewStringType::kInternalized));
+  ScriptOrigin origin =
+      CreateScriptOrigin(isolate, String::NewFromUtf8Literal(isolate, "(d8)"),
+                         ScriptType::kClassic);
+
   ScriptCompiler::Source script_source(source, origin);
   Local<UnboundScript> script;
   if (!ScriptCompiler::CompileUnboundScript(isolate, &script_source)
@@ -3284,6 +3331,9 @@ void Shell::WriteLcovData(v8::Isolate* isolate, const char* file) {
 
 void Shell::OnExit(v8::Isolate* isolate) {
   isolate->Dispose();
+  if (shared_isolate) {
+    i::Isolate::Delete(reinterpret_cast<i::Isolate*>(shared_isolate));
+  }
 
   if (i::FLAG_dump_counters || i::FLAG_dump_counters_nvp) {
     std::vector<std::pair<std::string, Counter*>> counters(
@@ -3850,6 +3900,7 @@ SourceGroup::IsolateThread::IsolateThread(SourceGroup* group)
 void SourceGroup::ExecuteInThread() {
   Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = Shell::array_buffer_allocator;
+  create_params.experimental_attach_to_shared_isolate = Shell::shared_isolate;
   Isolate* isolate = Isolate::New(create_params);
   Shell::SetWaitUntilDone(isolate, false);
   D8Console console(isolate);
@@ -4084,6 +4135,7 @@ void Worker::ProcessMessages() {
 void Worker::ExecuteInThread() {
   Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = Shell::array_buffer_allocator;
+  create_params.experimental_attach_to_shared_isolate = Shell::shared_isolate;
   isolate_ = Isolate::New(create_params);
   {
     base::MutexGuard lock_guard(&worker_mutex_);
@@ -4353,6 +4405,9 @@ bool Shell::SetOptions(int argc, char* argv[]) {
       argv[i] = nullptr;
     } else if (strncmp(argv[i], "--web-snapshot-config=", 22) == 0) {
       options.web_snapshot_config = argv[i] + 22;
+      argv[i] = nullptr;
+    } else if (strncmp(argv[i], "--web-snapshot-output=", 22) == 0) {
+      options.web_snapshot_output = argv[i] + 22;
       argv[i] = nullptr;
     } else if (strcmp(argv[i], "--experimental-d8-web-snapshot-api") == 0) {
       options.d8_web_snapshot_api = true;
@@ -4973,6 +5028,12 @@ void Shell::WaitForRunningWorkers() {
   allow_new_workers_ = true;
 }
 
+namespace {
+
+bool HasFlagThatRequiresSharedIsolate() { return i::FLAG_shared_string_table; }
+
+}  // namespace
+
 int Shell::Main(int argc, char* argv[]) {
   v8::base::EnsureConsoleOutput();
   if (!SetOptions(argc, argv)) return 1;
@@ -5123,6 +5184,14 @@ int Shell::Main(int argc, char* argv[]) {
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
+  if (HasFlagThatRequiresSharedIsolate()) {
+    Isolate::CreateParams shared_create_params;
+    shared_create_params.array_buffer_allocator = Shell::array_buffer_allocator;
+    shared_isolate =
+        reinterpret_cast<Isolate*>(i::Isolate::NewShared(shared_create_params));
+    create_params.experimental_attach_to_shared_isolate = shared_isolate;
+  }
+
   Isolate* isolate = Isolate::New(create_params);
 
   {
@@ -5196,6 +5265,8 @@ int Shell::Main(int argc, char* argv[]) {
         // First run to produce the cache
         Isolate::CreateParams create_params2;
         create_params2.array_buffer_allocator = Shell::array_buffer_allocator;
+        create_params2.experimental_attach_to_shared_isolate =
+            Shell::shared_isolate;
         i::FLAG_hash_seed ^= 1337;  // Use a different hash seed.
         Isolate* isolate2 = Isolate::New(create_params2);
         i::FLAG_hash_seed ^= 1337;  // Restore old hash seed.

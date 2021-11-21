@@ -48,6 +48,7 @@
 #include "include/v8-regexp.h"
 #include "include/v8-util.h"
 #include "src/api/api-inl.h"
+#include "src/base/bounds.h"
 #include "src/base/overflowing-math.h"
 #include "src/base/platform/platform.h"
 #include "src/base/strings.h"
@@ -13887,7 +13888,7 @@ UNINITIALIZED_TEST(SetJitCodeEventHandler) {
 #if ENABLE_SPARKPLUG
   i::FLAG_baseline_batch_compilation = false;
 #endif
-  if (i::FLAG_never_compact) return;
+  if (!i::FLAG_compact) return;
   const char* script =
       "function bar() {"
       "  var sum = 0;"
@@ -17448,7 +17449,10 @@ THREADED_TEST(ScriptOrigin) {
   CHECK(script_origin_f.Options().IsSharedCrossOrigin());
   CHECK(script_origin_f.Options().IsOpaque());
   printf("is name = %d\n", script_origin_f.SourceMapUrl()->IsUndefined());
-  CHECK(script_origin_f.HostDefinedOptions()->Get(isolate, 0)->IsSymbol());
+  CHECK(script_origin_f.GetHostDefinedOptions()
+            .As<v8::PrimitiveArray>()
+            ->Get(isolate, 0)
+            ->IsSymbol());
 
   CHECK_EQ(0, strcmp("http://sourceMapUrl",
                      *v8::String::Utf8Value(env->GetIsolate(),
@@ -17464,7 +17468,10 @@ THREADED_TEST(ScriptOrigin) {
   CHECK_EQ(0, strcmp("http://sourceMapUrl",
                      *v8::String::Utf8Value(env->GetIsolate(),
                                             script_origin_g.SourceMapUrl())));
-  CHECK(script_origin_g.HostDefinedOptions()->Get(isolate, 0)->IsSymbol());
+  CHECK(script_origin_g.GetHostDefinedOptions()
+            .As<v8::PrimitiveArray>()
+            ->Get(isolate, 0)
+            ->IsSymbol());
 }
 
 
@@ -18151,7 +18158,7 @@ void AssertOneByteConsContainsTwoByteExternal(i::Handle<i::String> maybe_cons,
   CHECK(maybe_cons->IsOneByteRepresentation());
   CHECK(maybe_cons->IsConsString());
   i::ConsString cons = i::ConsString::cast(*maybe_cons);
-  CHECK(cons.IsFlat());
+  CHECK(cons.IsFlat(GetPtrComprCageBase(cons)));
   CHECK(cons.first() == *external);
   CHECK(cons.first().IsTwoByteRepresentation());
   CHECK(cons.first().IsExternalString());
@@ -18570,7 +18577,17 @@ TEST(RunTwoIsolatesOnSingleThread) {
   v8::Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = CcTest::array_buffer_allocator();
   v8::Isolate* isolate1 = v8::Isolate::New(create_params);
+
+  CHECK(CcTest::isolate()->IsCurrent());
+  CHECK(!isolate1->IsCurrent());
+
   isolate1->Enter();
+  CHECK(!CcTest::isolate()->IsCurrent());
+  CHECK(isolate1->IsCurrent());
+
+  CHECK_EQ(isolate1, v8::Isolate::GetCurrent());
+  CHECK_EQ(isolate1, v8::Isolate::TryGetCurrent());
+
   v8::Persistent<v8::Context> context1;
   {
     v8::HandleScope scope(isolate1);
@@ -18591,8 +18608,16 @@ TEST(RunTwoIsolatesOnSingleThread) {
   v8::Isolate* isolate2 = v8::Isolate::New(create_params);
   v8::Persistent<v8::Context> context2;
 
+  CHECK(!CcTest::isolate()->IsCurrent());
+  CHECK(isolate1->IsCurrent());
+  CHECK(!isolate2->IsCurrent());
   {
     v8::Isolate::Scope iscope(isolate2);
+    CHECK(!isolate1->IsCurrent());
+    CHECK(isolate2->IsCurrent());
+    CHECK_EQ(isolate2, v8::Isolate::GetCurrent());
+    CHECK_EQ(isolate2, v8::Isolate::TryGetCurrent());
+
     v8::HandleScope scope(isolate2);
     context2.Reset(isolate2, Context::New(isolate2));
     v8::Local<v8::Context> context =
@@ -18604,6 +18629,10 @@ TEST(RunTwoIsolatesOnSingleThread) {
     ExpectString("function f() { return foo; }; f()", "isolate 2");
   }
 
+  CHECK(!CcTest::isolate()->IsCurrent());
+  CHECK(isolate1->IsCurrent());
+  CHECK(!isolate2->IsCurrent());
+
   {
     v8::HandleScope scope(isolate1);
     v8::Local<v8::Context> context =
@@ -18614,11 +18643,16 @@ TEST(RunTwoIsolatesOnSingleThread) {
   }
 
   isolate1->Exit();
+  CHECK(CcTest::isolate()->IsCurrent());
+  CHECK(!isolate1->IsCurrent());
+  CHECK(!isolate2->IsCurrent());
 
   // Run some stuff in default isolate.
   v8::Persistent<v8::Context> context_default;
   {
     v8::Isolate* isolate = CcTest::isolate();
+    CHECK_EQ(isolate, v8::Isolate::GetCurrent());
+    CHECK_EQ(isolate, v8::Isolate::TryGetCurrent());
     v8::Isolate::Scope iscope(isolate);
     v8::HandleScope scope(isolate);
     context_default.Reset(isolate, Context::New(isolate));
@@ -19265,16 +19299,22 @@ THREADED_TEST(CreationContext) {
     Local<Context> other_context = Context::New(isolate);
     Context::Scope scope(other_context);
     CHECK(object1->GetCreationContext().ToLocalChecked() == context1);
+    CHECK(object1->GetCreationContextChecked() == context1);
     CheckContextId(object1, 1);
     CHECK(func1->GetCreationContext().ToLocalChecked() == context1);
+    CHECK(func1->GetCreationContextChecked() == context1);
     CheckContextId(func1, 1);
     CHECK(instance1->GetCreationContext().ToLocalChecked() == context1);
+    CHECK(instance1->GetCreationContextChecked() == context1);
     CheckContextId(instance1, 1);
     CHECK(object2->GetCreationContext().ToLocalChecked() == context2);
+    CHECK(object2->GetCreationContextChecked() == context2);
     CheckContextId(object2, 2);
     CHECK(func2->GetCreationContext().ToLocalChecked() == context2);
+    CHECK(func2->GetCreationContextChecked() == context2);
     CheckContextId(func2, 2);
     CHECK(instance2->GetCreationContext().ToLocalChecked() == context2);
+    CHECK(instance2->GetCreationContextChecked() == context2);
     CheckContextId(instance2, 2);
   }
 
@@ -21708,7 +21748,7 @@ class RegExpInterruptTest {
 
 TEST(RegExpInterruptAndCollectAllGarbage) {
   // Move all movable objects on GC.
-  i::FLAG_always_compact = true;
+  i::FLAG_compact_on_every_full_gc = true;
   // We want to be stuck regexp execution, so no fallback to linear-time
   // engine.
   // TODO(mbid,v8:10765): Find a way to test interrupt support of the
@@ -26346,13 +26386,13 @@ TEST(CorrectEnteredContext) {
 const int kCustomHostDefinedOptionsLengthForTesting = 7;
 
 v8::MaybeLocal<v8::Promise> HostImportModuleDynamicallyCallbackResolve(
-    Local<Context> context, Local<v8::ScriptOrModule> referrer,
-    Local<String> specifier, Local<FixedArray> import_assertions) {
-  CHECK(!referrer.IsEmpty());
-  String::Utf8Value referrer_utf8(
-      context->GetIsolate(), Local<String>::Cast(referrer->GetResourceName()));
+    Local<v8::Context> context, Local<v8::Data> host_defined_options,
+    Local<v8::Value> resource_name, Local<v8::String> specifier,
+    Local<v8::FixedArray> import_assertions) {
+  String::Utf8Value referrer_utf8(context->GetIsolate(),
+                                  resource_name.As<String>());
   CHECK_EQ(0, strcmp("www.google.com", *referrer_utf8));
-  CHECK_EQ(referrer->GetHostDefinedOptions()->Length(),
+  CHECK_EQ(host_defined_options.As<v8::FixedArray>()->Length(),
            kCustomHostDefinedOptionsLengthForTesting);
   CHECK(!specifier.IsEmpty());
   String::Utf8Value specifier_utf8(context->GetIsolate(), specifier);
@@ -26394,13 +26434,13 @@ TEST(DynamicImport) {
 
 v8::MaybeLocal<v8::Promise>
 HostImportModuleDynamicallyWithAssertionsCallbackResolve(
-    Local<Context> context, Local<v8::ScriptOrModule> referrer,
-    Local<String> specifier, Local<v8::FixedArray> import_assertions) {
-  CHECK(!referrer.IsEmpty());
-  String::Utf8Value referrer_utf8(
-      context->GetIsolate(), Local<String>::Cast(referrer->GetResourceName()));
+    Local<v8::Context> context, Local<v8::Data> host_defined_options,
+    Local<v8::Value> resource_name, Local<v8::String> specifier,
+    Local<v8::FixedArray> import_assertions) {
+  String::Utf8Value referrer_utf8(context->GetIsolate(),
+                                  resource_name.As<String>());
   CHECK_EQ(0, strcmp("www.google.com", *referrer_utf8));
-  CHECK_EQ(referrer->GetHostDefinedOptions()->Length(),
+  CHECK_EQ(host_defined_options.As<v8::FixedArray>()->Length(),
            kCustomHostDefinedOptionsLengthForTesting);
 
   CHECK(!specifier.IsEmpty());
@@ -27213,18 +27253,18 @@ TEST(GetJSEntryStubs) {
   v8::JSEntryStubs entry_stubs = isolate->GetJSEntryStubs();
 
   v8::JSEntryStub entry_stub = entry_stubs.js_entry_stub;
-  CHECK_EQ(i_isolate->heap()->builtin(i::Builtin::kJSEntry).InstructionStart(),
+  CHECK_EQ(i_isolate->builtins()->code(i::Builtin::kJSEntry).InstructionStart(),
            reinterpret_cast<i::Address>(entry_stub.code.start));
 
   v8::JSEntryStub construct_stub = entry_stubs.js_construct_entry_stub;
-  CHECK_EQ(i_isolate->heap()
-               ->builtin(i::Builtin::kJSConstructEntry)
+  CHECK_EQ(i_isolate->builtins()
+               ->code(i::Builtin::kJSConstructEntry)
                .InstructionStart(),
            reinterpret_cast<i::Address>(construct_stub.code.start));
 
   v8::JSEntryStub microtask_stub = entry_stubs.js_run_microtasks_entry_stub;
-  CHECK_EQ(i_isolate->heap()
-               ->builtin(i::Builtin::kJSRunMicrotasksEntry)
+  CHECK_EQ(i_isolate->builtins()
+               ->code(i::Builtin::kJSRunMicrotasksEntry)
                .InstructionStart(),
            reinterpret_cast<i::Address>(microtask_stub.code.start));
 }
@@ -28872,14 +28912,36 @@ TEST(FastApiCalls) {
 
 #ifndef V8_LITE_MODE
 namespace {
+static Trivial* UnwrapTrivialObject(Local<Object> object) {
+  i::Address addr = *reinterpret_cast<i::Address*>(*object);
+  auto instance_type = i::Internals::GetInstanceType(addr);
+  bool is_valid =
+      (v8::base::IsInRange(instance_type, i::Internals::kFirstJSApiObjectType,
+                           i::Internals::kLastJSApiObjectType) ||
+       instance_type == i::Internals::kJSSpecialApiObjectType);
+  if (!is_valid) {
+    return nullptr;
+  }
+  Trivial* wrapped = static_cast<Trivial*>(
+      object->GetAlignedPointerFromInternalField(kV8WrapperObjectIndex));
+  CHECK_NOT_NULL(wrapped);
+  return wrapped;
+}
+
 void FastCallback1TypedArray(v8::Local<v8::Object> receiver, int arg0,
-                             const v8::FastApiTypedArray<double>& arg1) {
-  // TODO(mslekova): Use the TypedArray parameter
+                             const v8::FastApiTypedArray<int32_t>& arg1) {
+  Trivial* self = UnwrapTrivialObject(receiver);
+  CHECK_NOT_NULL(self);
+  CHECK_EQ(arg0, arg1.length());
+  self->set_x(arg0);
 }
 
 void FastCallback2JSArray(v8::Local<v8::Object> receiver, int arg0,
                           v8::Local<v8::Array> arg1) {
-  // TODO(mslekova): Use the JSArray parameter
+  Trivial* self = UnwrapTrivialObject(receiver);
+  CHECK_NOT_NULL(self);
+  CHECK_EQ(arg0, arg1->Length());
+  self->set_x(arg0);
 }
 
 void FastCallback3SwappedParams(v8::Local<v8::Object> receiver,
@@ -28890,6 +28952,40 @@ void FastCallback4Scalar(v8::Local<v8::Object> receiver, int arg0, float arg1) {
 
 void FastCallback5DifferentArity(v8::Local<v8::Object> receiver, int arg0,
                                  v8::Local<v8::Array> arg1, float arg2) {}
+
+void SequenceSlowCallback(const v8::FunctionCallbackInfo<v8::Value>& args) {
+  v8::Isolate* isolate = args.GetIsolate();
+  Trivial* self = UnwrapTrivialObject(args.This());
+  if (!self) {
+    isolate->ThrowError("This method is not defined on the given receiver.");
+    return;
+  }
+  self->set_x(1337);
+
+  HandleScope handle_scope(isolate);
+
+  if (args.Length() < 2 || !args[0]->IsNumber()) {
+    isolate->ThrowError(
+        "This method expects at least 2 arguments,"
+        " first one a number.");
+    return;
+  }
+  int64_t len = args[0]->IntegerValue(isolate->GetCurrentContext()).FromJust();
+  if (args[1]->IsTypedArray()) {
+    v8::Local<v8::TypedArray> typed_array_arg = args[1].As<v8::TypedArray>();
+    size_t length = typed_array_arg->Length();
+    CHECK_EQ(len, length);
+    return;
+  }
+  if (!args[1]->IsArray()) {
+    isolate->ThrowError("This method expects an array as a second argument.");
+    return;
+  }
+  v8::Local<v8::Array> seq_arg = args[1].As<v8::Array>();
+  uint32_t length = seq_arg->Length();
+  CHECK_EQ(len, length);
+  return;
+}
 }  // namespace
 #endif  // V8_LITE_MODE
 
@@ -28905,24 +29001,49 @@ TEST(FastApiSequenceOverloads) {
   v8::internal::FLAG_always_opt = false;
   v8::internal::FlagList::EnforceFlagImplications();
 
+  v8::Isolate* isolate = CcTest::isolate();
+  HandleScope handle_scope(isolate);
+  LocalContext env;
+
   v8::CFunction typed_array_callback =
-      v8::CFunctionBuilder()
-          .Fn(FastCallback1TypedArray)
-          .Arg<0, v8::CTypeInfo::Flags::kNone>()
-          .Arg<1, v8::CTypeInfo::Flags::kNone>()
-          .Arg<2, v8::CTypeInfo::Flags::kAllowSharedBit>()
-          .Build();
-  v8::CFunction js_array_callback = v8::CFunctionBuilder()
-                                        .Fn(FastCallback2JSArray)
-                                        .Arg<0, v8::CTypeInfo::Flags::kNone>()
-                                        .Arg<1, v8::CTypeInfo::Flags::kNone>()
-                                        .Arg<2, v8::CTypeInfo::Flags::kNone>()
-                                        .Build();
+      v8::CFunctionBuilder().Fn(FastCallback1TypedArray).Build();
+  v8::CFunction js_array_callback =
+      v8::CFunctionBuilder().Fn(FastCallback2JSArray).Build();
+  const v8::CFunction sequece_overloads[] = {
+      typed_array_callback,
+      js_array_callback,
+  };
 
-  // TODO(mslekova): Create a FunctionTemplate with the 2 overloads.
-  USE(typed_array_callback);
-  USE(js_array_callback);
+  Local<v8::FunctionTemplate> sequence_callback_templ =
+      v8::FunctionTemplate::NewWithCFunctionOverloads(
+          isolate, SequenceSlowCallback, v8::Number::New(isolate, 42),
+          v8::Local<v8::Signature>(), 1, v8::ConstructorBehavior::kAllow,
+          v8::SideEffectType::kHasSideEffect, {sequece_overloads, 2});
 
+  v8::Local<v8::ObjectTemplate> object_template =
+      v8::ObjectTemplate::New(isolate);
+  object_template->SetInternalFieldCount(kV8WrapperObjectIndex + 1);
+  object_template->Set(isolate, "api_func", sequence_callback_templ);
+
+  std::unique_ptr<Trivial> rcv(new Trivial(42));
+  v8::Local<v8::Object> object =
+      object_template->NewInstance(env.local()).ToLocalChecked();
+  object->SetAlignedPointerInInternalField(kV8WrapperObjectIndex, rcv.get());
+
+  CHECK(
+      (env)->Global()->Set(env.local(), v8_str("receiver"), object).FromJust());
+  USE(CompileRun(
+      "function func(num, arr) { return receiver.api_func(num, arr); }"
+      "%PrepareFunctionForOptimization(func);"
+      "func(3, [1,2,3]);"
+      "%OptimizeFunctionOnNextCall(func);"
+      "func(3, [1,2,3]);"));
+  CHECK_EQ(3, rcv->x());
+
+  USE(
+      CompileRun("const ta = new Int32Array([1, 2, 3, 4]);"
+                 "func(4, ta);"));
+  CHECK_EQ(4, rcv->x());
 #endif  // V8_LITE_MODE
 }
 

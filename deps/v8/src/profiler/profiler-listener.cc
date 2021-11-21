@@ -177,7 +177,7 @@ void ProfilerListener::CodeCreateEvent(LogEventsAndTags tag,
           if (pos_info.position.ScriptOffset() == kNoSourcePosition) continue;
           if (pos_info.script.is_null()) continue;
 
-          int line_number =
+          line_number =
               pos_info.script->GetLineNumber(pos_info.position.ScriptOffset()) +
               1;
 
@@ -315,7 +315,8 @@ void ProfilerListener::CodeDisableOptEvent(Handle<AbstractCode> code,
   CodeEventsContainer evt_rec(CodeEventRecord::CODE_DISABLE_OPT);
   CodeDisableOptEventRecord* rec = &evt_rec.CodeDisableOptEventRecord_;
   rec->instruction_start = code->InstructionStart();
-  rec->bailout_reason = GetBailoutReason(shared->disable_optimization_reason());
+  rec->bailout_reason =
+      GetBailoutReason(shared->disabled_optimization_reason());
   DispatchCodeEvent(evt_rec);
 }
 

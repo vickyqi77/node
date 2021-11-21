@@ -115,6 +115,7 @@ class Symbol;
   IF_WASM(V, Map, wasm_exported_function_data_map,                             \
           WasmExportedFunctionDataMap)                                         \
   IF_WASM(V, Map, wasm_js_function_data_map, WasmJSFunctionDataMap)            \
+  IF_WASM(V, Map, wasm_api_function_ref_map, WasmApiFunctionRefMap)            \
   IF_WASM(V, Map, wasm_type_info_map, WasmTypeInfoMap)                         \
   V(Map, weak_fixed_array_map, WeakFixedArrayMap)                              \
   V(Map, weak_array_list_map, WeakArrayListMap)                                \
@@ -141,6 +142,8 @@ class Symbol;
     UncachedExternalOneByteInternalizedStringMap)                              \
   V(Map, uncached_external_one_byte_string_map,                                \
     UncachedExternalOneByteStringMap)                                          \
+  V(Map, shared_one_byte_string_map, SharedOneByteStringMap)                   \
+  V(Map, shared_string_map, SharedStringMap)                                   \
   /* Oddball maps */                                                           \
   V(Map, undefined_map, UndefinedMap)                                          \
   V(Map, the_hole_map, TheHoleMap)                                             \
@@ -307,7 +310,8 @@ class Symbol;
   V(Object, pending_optimize_for_test_bytecode,                            \
     PendingOptimizeForTestBytecode)                                        \
   V(ArrayList, basic_block_profiling_data, BasicBlockProfilingData)        \
-  V(WeakArrayList, shared_wasm_memories, SharedWasmMemories)
+  V(WeakArrayList, shared_wasm_memories, SharedWasmMemories)               \
+  IF_WASM(V, HeapObject, active_continuation, ActiveContinuation)
 
 // Entries in this list are limited to Smis and are not visited during GC.
 #define SMI_ROOT_LIST(V)                                                       \

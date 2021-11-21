@@ -38,6 +38,9 @@ namespace internal {
     "await is only valid in async functions and the top level bodies of "      \
     "modules")                                                                 \
   T(AwaitNotInAsyncFunction, "await is only valid in async function")          \
+  T(AwaitNotInDebugEvaluate,                                                   \
+    "await can not be used when evaluating code "                              \
+    "while paused in the debugger")                                            \
   T(AtomicsWaitNotAllowed, "Atomics.wait cannot be called in this context")    \
   T(BadSortComparisonFunction,                                                 \
     "The comparison function must be either a function or undefined")          \
@@ -439,10 +442,11 @@ namespace internal {
     "Invalid module export name: contains unpaired surrogate")                 \
   T(InvalidRegExpFlags, "Invalid flags supplied to RegExp constructor '%'")    \
   T(InvalidOrUnexpectedToken, "Invalid or unexpected token")                   \
-  T(InvalidPrivateBrand, "Object must be an instance of class %")              \
+  T(InvalidPrivateBrandInstance, "Receiver must be an instance of class %")    \
+  T(InvalidPrivateBrandStatic, "Receiver must be class %")                     \
   T(InvalidPrivateBrandReinitialization,                                       \
     "Cannot initialize private methods of class % twice on the same object")   \
-  T(InvalidPrivateFieldReitialization,                                         \
+  T(InvalidPrivateFieldReinitialization,                                       \
     "Cannot initialize % twice on the same object")                            \
   T(InvalidPrivateFieldResolution,                                             \
     "Private field '%' must be declared in an enclosing class")                \
@@ -629,7 +633,9 @@ namespace internal {
   T(OptionalChainingNoSuper, "Invalid optional chain from super property")     \
   T(OptionalChainingNoTemplate, "Invalid tagged template on optional chain")   \
   /* AggregateError */                                                         \
-  T(AllPromisesRejected, "All promises were rejected")
+  T(AllPromisesRejected, "All promises were rejected")                         \
+  /* Web snapshots */                                                          \
+  T(WebSnapshotError, "Web snapshot failed: %")
 
 enum class MessageTemplate {
 #define TEMPLATE(NAME, STRING) k##NAME,

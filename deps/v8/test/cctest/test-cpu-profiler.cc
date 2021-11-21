@@ -571,7 +571,7 @@ v8::CpuProfile* ProfilerHelper::Run(v8::Local<v8::Function> function,
                                     v8::Local<v8::Context> context) {
   v8::Local<v8::String> profile_name = v8_str("my_profile");
 
-  profiler_->SetSamplingInterval(50);
+  profiler_->SetSamplingInterval(20);
   profiler_->StartProfiling(profile_name, {mode, max_samples, 0, context});
 
   v8::internal::CpuProfiler* iprofiler =
@@ -750,6 +750,10 @@ static const char* cpu_profiler_test_source =
 //     2     2    (program) [-1]
 //     6     6    (garbage collector) [-1]
 TEST(CollectCpuProfile) {
+  // Skip test if concurrent sparkplug is enabled. The test becomes flaky,
+  // since it requires a precise trace.
+  if (i::FLAG_concurrent_sparkplug) return;
+
   i::FLAG_allow_natives_syntax = true;
   LocalContext env;
   v8::HandleScope scope(env->GetIsolate());
@@ -779,6 +783,10 @@ TEST(CollectCpuProfile) {
 }
 
 TEST(CollectCpuProfileCallerLineNumbers) {
+  // Skip test if concurrent sparkplug is enabled. The test becomes flaky,
+  // since it requires a precise trace.
+  if (i::FLAG_concurrent_sparkplug) return;
+
   i::FLAG_allow_natives_syntax = true;
   LocalContext env;
   v8::HandleScope scope(env->GetIsolate());
@@ -1373,6 +1381,10 @@ static const char* call_function_test_source =
 //     1     1      bar [-1] #7
 //    19    19    (program) [-1] #2
 TEST(FunctionCallSample) {
+  // Skip test if concurrent sparkplug is enabled. The test becomes flaky,
+  // since it requires a precise trace.
+  if (i::FLAG_concurrent_sparkplug) return;
+
   i::FLAG_allow_natives_syntax = true;
   LocalContext env;
   v8::HandleScope scope(env->GetIsolate());
@@ -1430,6 +1442,10 @@ static const char* function_apply_test_source =
 //     2     2        bar [-1] #16 6
 //    10    10    (program) [-1] #0 2
 TEST(FunctionApplySample) {
+  // Skip test if concurrent sparkplug is enabled. The test becomes flaky,
+  // since it requires a precise trace.
+  if (i::FLAG_concurrent_sparkplug) return;
+
   i::FLAG_allow_natives_syntax = true;
   LocalContext env;
   v8::HandleScope scope(env->GetIsolate());
@@ -1909,6 +1925,10 @@ static const char* inlining_test_source2 = R"(
 //                        bailed out due to 'Optimization is always disabled'
 //     2    (program):0 0 #2
 TEST(Inlining2) {
+  // Skip test if concurrent sparkplug is enabled. The test becomes flaky,
+  // since it requires a precise trace.
+  if (FLAG_concurrent_sparkplug) return;
+
   FLAG_allow_natives_syntax = true;
   v8::Isolate* isolate = CcTest::isolate();
   LocalContext env;
@@ -1997,6 +2017,10 @@ static const char* cross_script_source_b = R"(
   )";
 
 TEST(CrossScriptInliningCallerLineNumbers) {
+  // Skip test if concurrent sparkplug is enabled. The test becomes flaky,
+  // since it requires a precise trace.
+  if (i::FLAG_concurrent_sparkplug) return;
+
   i::FLAG_allow_natives_syntax = true;
   v8::Isolate* isolate = CcTest::isolate();
   LocalContext env;
@@ -2088,6 +2112,10 @@ static const char* cross_script_source_f = R"(
   )";
 
 TEST(CrossScriptInliningCallerLineNumbers2) {
+  // Skip test if concurrent sparkplug is enabled. The test becomes flaky,
+  // since it requires a precise trace.
+  if (i::FLAG_concurrent_sparkplug) return;
+
   i::FLAG_allow_natives_syntax = true;
   LocalContext env;
   v8::HandleScope scope(CcTest::isolate());
@@ -4331,7 +4359,7 @@ TEST(ClearUnusedWithEagerLogging) {
 
   CodeMap* code_map = profiler.code_map_for_test();
   size_t initial_size = code_map->size();
-  size_t profiler_size = code_observer->GetEstimatedMemoryUsage();
+  size_t profiler_size = profiler.GetEstimatedMemoryUsage();
 
   {
     // Create and run a new script and function, generating 2 code objects.
@@ -4343,7 +4371,8 @@ TEST(ClearUnusedWithEagerLogging) {
         "function some_func() {}"
         "some_func();");
     CHECK_GT(code_map->size(), initial_size);
-    CHECK_GT(code_observer->GetEstimatedMemoryUsage(), profiler_size);
+    CHECK_GT(profiler.GetEstimatedMemoryUsage(), profiler_size);
+    CHECK_GT(profiler.GetAllProfilersMemorySize(isolate), profiler_size);
   }
 
   // Clear the compilation cache so that there are no more references to the
@@ -4354,7 +4383,8 @@ TEST(ClearUnusedWithEagerLogging) {
 
   // Verify that the CodeMap's size is unchanged post-GC.
   CHECK_EQ(code_map->size(), initial_size);
-  CHECK_EQ(code_observer->GetEstimatedMemoryUsage(), profiler_size);
+  CHECK_EQ(profiler.GetEstimatedMemoryUsage(), profiler_size);
+  CHECK_EQ(profiler.GetAllProfilersMemorySize(isolate), profiler_size);
 }
 
 // Ensure that ProfilerCodeObserver doesn't compute estimated size when race
@@ -4367,20 +4397,20 @@ TEST(SkipEstimatedSizeWhenActiveProfiling) {
 
   CodeEntryStorage storage;
   CpuProfilesCollection* profiles = new CpuProfilesCollection(isolate);
-  ProfilerCodeObserver* code_observer =
-      new ProfilerCodeObserver(isolate, storage);
-
   CpuProfiler profiler(isolate, kDebugNaming, kEagerLogging, profiles, nullptr,
-                       nullptr, code_observer);
+                       nullptr, new ProfilerCodeObserver(isolate, storage));
 
-  CHECK_GT(code_observer->GetEstimatedMemoryUsage(), 0);
+  CHECK_GT(profiler.GetAllProfilersMemorySize(isolate), 0);
+  CHECK_GT(profiler.GetEstimatedMemoryUsage(), 0);
 
   profiler.StartProfiling("");
-  CHECK_EQ(code_observer->GetEstimatedMemoryUsage(), 0);
+  CHECK_EQ(profiler.GetAllProfilersMemorySize(isolate), 0);
+  CHECK_EQ(profiler.GetEstimatedMemoryUsage(), 0);
 
   profiler.StopProfiling("");
 
-  CHECK_GT(code_observer->GetEstimatedMemoryUsage(), 0);
+  CHECK_GT(profiler.GetAllProfilersMemorySize(isolate), 0);
+  CHECK_GT(profiler.GetEstimatedMemoryUsage(), 0);
 }
 
 }  // namespace test_cpu_profiler

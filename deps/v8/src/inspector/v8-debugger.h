@@ -210,12 +210,42 @@ class V8Debugger : public v8::debug::DebugDelegate,
   String16 m_continueToLocationTargetCallFrames;
   std::unique_ptr<V8StackTraceImpl> m_continueToLocationStack;
 
+  // We cache symbolized stack frames by (scriptId,lineNumber,columnNumber)
+  // to reduce memory pressure for huge web apps with lots of deep async
+  // stacks.
+  struct CachedStackFrameKey {
+    int scriptId;
+    int lineNumber;
+    int columnNumber;
+
+    struct Equal {
+      bool operator()(CachedStackFrameKey const& a,
+                      CachedStackFrameKey const& b) const {
+        return a.scriptId == b.scriptId && a.lineNumber == b.lineNumber &&
+               a.columnNumber == b.columnNumber;
+      }
+    };
+
+    struct Hash {
+      size_t operator()(CachedStackFrameKey const& key) const {
+        size_t code = 0;
+        code = code * 31 + key.scriptId;
+        code = code * 31 + key.lineNumber;
+        code = code * 31 + key.columnNumber;
+        return code;
+      }
+    };
+  };
+  std::unordered_map<CachedStackFrameKey, std::weak_ptr<StackFrame>,
+                     CachedStackFrameKey::Hash, CachedStackFrameKey::Equal>
+      m_cachedStackFrames;
+
   using AsyncTaskToStackTrace =
       std::unordered_map<void*, std::weak_ptr<AsyncStackTrace>>;
   AsyncTaskToStackTrace m_asyncTaskStacks;
   std::unordered_set<void*> m_recurringTasks;
 
-  int m_maxAsyncCallStacks;
+  size_t m_maxAsyncCallStacks;
   int m_maxAsyncCallStackDepth;
 
   std::vector<void*> m_currentTasks;
@@ -223,7 +253,6 @@ class V8Debugger : public v8::debug::DebugDelegate,
   std::vector<V8StackTraceId> m_currentExternalParent;
 
   void collectOldAsyncStacksIfNeeded();
-  int m_asyncStacksCount = 0;
   // V8Debugger owns all the async stacks, while most of the other references
   // are weak, which allows to collect some stacks when there are too many.
   std::list<std::shared_ptr<AsyncStackTrace>> m_allAsyncStacks;

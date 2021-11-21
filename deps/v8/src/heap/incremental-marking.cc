@@ -65,13 +65,6 @@ void IncrementalMarking::MarkBlackAndVisitObjectDueToLayoutChange(
   collector_->VisitObject(obj);
 }
 
-void IncrementalMarking::MarkBlackAndRevisitObject(Code code) {
-  TRACE_EVENT0("v8", "V8.GCIncrementalMarkingLayoutChange");
-  TRACE_GC(heap()->tracer(), GCTracer::Scope::MC_INCREMENTAL_LAYOUT_CHANGE);
-  marking_state()->WhiteToBlack(code);
-  collector_->RevisitObject(code);
-}
-
 void IncrementalMarking::MarkBlackBackground(HeapObject obj, int object_size) {
   MarkBit mark_bit = atomic_marking_state()->MarkBitFrom(obj);
   Marking::MarkBlack<AccessMode::ATOMIC>(mark_bit);
@@ -238,7 +231,8 @@ void IncrementalMarking::StartMarking() {
 
   heap_->InvokeIncrementalMarkingPrologueCallbacks();
 
-  is_compacting_ = !FLAG_never_compact && collector_->StartCompaction();
+  is_compacting_ = collector_->StartCompaction(
+      MarkCompactCollector::StartCompactionMode::kIncremental);
   collector_->StartMarking();
 
   SetState(MARKING);
@@ -645,7 +639,7 @@ void IncrementalMarking::FinalizeMarking(CompletionAction action) {
         "[IncrementalMarking] requesting finalization of incremental "
         "marking.\n");
   }
-  request_type_ = FINALIZATION;
+  request_type_ = GCRequestType::FINALIZATION;
   if (action == GC_VIA_STACK_GUARD) {
     heap_->isolate()->stack_guard()->RequestGC();
   }
@@ -715,7 +709,7 @@ void IncrementalMarking::MarkingComplete(CompletionAction action) {
     heap()->isolate()->PrintWithTimestamp(
         "[IncrementalMarking] Complete (normal).\n");
   }
-  request_type_ = COMPLETE_MARKING;
+  request_type_ = GCRequestType::COMPLETE_MARKING;
   if (action == GC_VIA_STACK_GUARD) {
     heap_->isolate()->stack_guard()->RequestGC();
   }

@@ -282,7 +282,7 @@
     'tests': [
       {'name': 'mjsunit_sp_frame_access'},
       {'name': 'mozilla'},
-      {'name': 'test262', 'variant': 'default'},
+      {'name': 'test262', 'variant': 'default', 'shards': 2},
       {'name': 'v8testing', 'shards': 7},
       {'name': 'v8testing', 'variant': 'extra', 'shards': 7},
     ],
@@ -371,6 +371,14 @@
     },
     'tests': [
       {'name': 'v8testing', 'shards': 3},
+    ],
+  },
+  'v8_linux64_disable_runtime_call_stats_rel_ng_triggered': {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-18.04',
+    },
+    'tests': [
+      {'name': 'v8testing'},
     ],
   },
   'v8_linux64_external_code_space_dbg_ng_triggered': {
@@ -1240,6 +1248,14 @@
       {'name': 'v8testing', 'shards': 3},
     ],
   },
+  'V8 Linux64 - disable runtime call stats': {
+    'swarming_dimensions' : {
+      'os': 'Ubuntu-18.04',
+    },
+    'tests': [
+      {'name': 'v8testing'},
+    ],
+  },
   'V8 Linux64 - debug - fyi': {
     'swarming_dimensions' : {
       'os': 'Ubuntu-18.04',
@@ -1743,7 +1759,7 @@
     'tests': [
       {'name': 'mjsunit_sp_frame_access'},
       {'name': 'mozilla'},
-      {'name': 'test262', 'variant': 'default'},
+      {'name': 'test262', 'variant': 'default', 'shards': 2},
       {'name': 'v8testing', 'shards': 6},
       {'name': 'v8testing', 'variant': 'extra', 'shards': 3},
       # Armv8-a.
@@ -1791,7 +1807,7 @@
     'tests': [
       {'name': 'mjsunit_sp_frame_access', 'shards': 6},
       {'name': 'mozilla', 'shards': 6},
-      {'name': 'test262', 'variant': 'default'},
+      {'name': 'test262', 'variant': 'default', 'shards': 2},
       {'name': 'v8testing', 'shards': 10},
       {'name': 'v8testing', 'variant': 'extra', 'shards': 10},
       # Armv8-a.

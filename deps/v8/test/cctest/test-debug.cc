@@ -3038,8 +3038,7 @@ TEST(DebugBreakInWrappedScript) {
   {
     v8::ScriptCompiler::Source script_source(v8_str(source));
     v8::Local<v8::Function> fun =
-        v8::ScriptCompiler::CompileFunctionInContext(
-            env.local(), &script_source, 0, nullptr, 0, nullptr)
+        v8::ScriptCompiler::CompileFunction(env.local(), &script_source)
             .ToLocalChecked();
     v8::Local<v8::Value> result =
         fun->Call(env.local(), env->Global(), 0, nullptr).ToLocalChecked();
@@ -5373,8 +5372,7 @@ TEST(TerminateOnResumeAtException) {
 
     v8::ScriptCompiler::Source script_source(v8_str(source));
     v8::Local<v8::Function> foo =
-        v8::ScriptCompiler::CompileFunctionInContext(
-            env.local(), &script_source, 0, nullptr, 0, nullptr)
+        v8::ScriptCompiler::CompileFunction(env.local(), &script_source)
             .ToLocalChecked();
 
     v8::MaybeLocal<v8::Value> val =
@@ -5620,8 +5618,7 @@ TEST(TerminateOnResumeFromOtherThread) {
 
     v8::ScriptCompiler::Source script_source(v8_str(source));
     v8::Local<v8::Function> foo =
-        v8::ScriptCompiler::CompileFunctionInContext(
-            env.local(), &script_source, 0, nullptr, 0, nullptr)
+        v8::ScriptCompiler::CompileFunction(env.local(), &script_source)
             .ToLocalChecked();
 
     v8::MaybeLocal<v8::Value> val =
@@ -5675,8 +5672,7 @@ TEST(TerminateOnResumeAtInterruptFromOtherThread) {
 
     v8::ScriptCompiler::Source script_source(v8_str(source));
     v8::Local<v8::Function> foo =
-        v8::ScriptCompiler::CompileFunctionInContext(
-            env.local(), &script_source, 0, nullptr, 0, nullptr)
+        v8::ScriptCompiler::CompileFunction(env.local(), &script_source)
             .ToLocalChecked();
 
     CHECK(timeout_thread.Start());
@@ -5689,6 +5685,35 @@ TEST(TerminateOnResumeAtInterruptFromOtherThread) {
   // Exiting the TryCatch brought the isolate back to a state where JavaScript
   // can be executed.
   ExpectInt32("1 + 1", 2);
+  v8::debug::SetDebugDelegate(env->GetIsolate(), nullptr);
+  CheckDebuggerUnloaded();
+}
+
+namespace {
+
+class NoopDelegate : public v8::debug::DebugDelegate {};
+
+}  // namespace
+
+// Tests that the Isolate::Pop/Push leaves an empty stack for `await` when
+// the Debugger is active but the AsyncEventDelegate is not set.
+// Regression test for https://crbug.com/1225905
+TEST(AwaitCleansUpGlobalPromiseStack) {
+  LocalContext env;
+  v8::HandleScope scope(env->GetIsolate());
+
+  NoopDelegate delegate;
+  v8::debug::SetDebugDelegate(env->GetIsolate(), &delegate);
+  v8::debug::SetAsyncEventDelegate(env->GetIsolate(), nullptr);
+
+  v8::Local<v8::String> source = v8_str(
+      "(async () => {\n"
+      "  await Promise.resolve();\n"
+      "})();\n");
+  CompileRun(source);
+
+  CHECK_EQ(CcTest::i_isolate()->thread_local_top()->promise_on_stack_, nullptr);
+
   v8::debug::SetDebugDelegate(env->GetIsolate(), nullptr);
   CheckDebuggerUnloaded();
 }
